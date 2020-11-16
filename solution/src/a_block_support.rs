@@ -4,35 +4,23 @@
 //!
 //! [`FileSysSupport`]: ../../cplfs_api/fs/trait.FileSysSupport.html
 //! [`BlockSupport`]: ../../cplfs_api/fs/trait.BlockSupport.html
-//! Make sure this file does not contain any unaddressed `TODO`s anymore when you hand it in.
 //!
 //! # Status
 //!
-//! **TODO**: Replace the question mark below with YES, NO, or PARTIAL to
-//! indicate the status of this assignment. If you want to tell something
-//! about this assignment to the grader, e.g., you have a bug you can't fix,
-//! or you want to explain your approach, write it down after the comments
-//! section. If you had no major issues and everything works, there is no need to write any comments.
-//!
-//! COMPLETED: ?
+//! COMPLETED: YES
 //!
 //! COMMENTS:
-//!
-//! ...
 //!
 
 // Turn off the warnings we get from the below example imports, which are currently unused.
 // TODO: this should be removed once you are done implementing this file. You can remove all of the below imports you do not need, as they are simply there to illustrate how you can import things.
-#![allow(unused_imports)]
+// #![allow(unused_imports)]
 
-use std::env::VarError;
+use std::path::Path;
+
 // We import std::error and std::format so we can say error::Error instead of
 // std::error::Error, etc.
 use anyhow::Result;
-use std::error;
-use std::error::Error;
-use std::fmt;
-use std::path::Path;
 use thiserror::Error;
 
 use cplfs_api::controller::Device;
@@ -40,39 +28,37 @@ use cplfs_api::error_given::APIError;
 // If you want to import things from the API crate, do so as follows:
 use cplfs_api::fs::BlockSupport;
 use cplfs_api::fs::FileSysSupport;
-use cplfs_api::types::{Block, Inode, SuperBlock};
-use std::borrow::Borrow;
+use cplfs_api::types::{Block, SuperBlock};
 
-/// You are free to choose the name for your file system. As we will use
-/// automated tests when grading your assignment, indicate here the name of
-/// your file system data type so we can just use `FSName` instead of
-/// having to manually figure out your file system name.
-/// **TODO**: replace the below type by the type of your file system
-
-/// This error can occurs during manipulating with File System
+/// This error can occurs during manipulating with Block File System
 #[derive(Error, Debug)]
-pub enum FSError {
-    /// Error caused when checking SuperBlock validity.
-    #[error("Issue in FileSystem initialization with SuperBlock")]
-    InvalidSuperBlock(&'static str),
-    /// Error caused when checking SuperBlock validity.
-    #[error("Issue with block operation: {0}")]
-    BlockOperationError(&'static str),
-    /// Dsafdsafasd
-    #[error("{0}")]
-    FromAPIerror(#[from] APIError),
+pub enum BlockLevelError {
+    /// Error caused when `SuperBlock` to initialize `BlockFileSystem` is not valid.
+    #[error("Invalid SuperBlock in BlockFileSystem initialization")]
+    InvalidSuperBlock,
+    /// Error caused when operation to free or alloc a Block is not valid.
+    #[error("Invalid block operation: {0}")]
+    InvalidBlockOperation(&'static str),
+    /// Error caused when index to access Block is out of datablock size.
+    #[error("Invalid block index: {0}")]
+    InvalidBlockIndex(&'static str),
+    /// Error caused when performing controller operations.
+    #[error("Controller error: {0}")]
+    ControllerError(#[from] APIError),
     ///This error has mostly been added for illustrative purposes, and can be useful for quickly drafting some code without thinking about the concrete error
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
 
-///my
-pub struct FileSystem {
-    device: Box<Device>,
+/// `BlockFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `Device` to offer block-level abstraction to operate with File System.
+pub struct BlockFileSystem {
+    /// Wrapped device as a boxed Device.
+    pub device: Box<Device>,
 }
 
-impl FileSysSupport for FileSystem {
-    type Error = FSError;
+/// Implementation of FileSysSupport in BlockFileSystem
+impl FileSysSupport for BlockFileSystem {
+    type Error = BlockLevelError;
 
     fn sb_valid(sb: &SuperBlock) -> bool {
         if sb.inodestart > sb.bmapstart || sb.bmapstart > sb.datastart {
@@ -85,10 +71,8 @@ impl FileSysSupport for FileSystem {
     }
 
     fn mkfs<P: AsRef<Path>>(path: P, sb: &SuperBlock) -> Result<Self, Self::Error> {
-        if !FileSystem::sb_valid(&sb) {
-            return Err(FSError::InvalidSuperBlock(
-                "Invalid Super Block to initialize File System",
-            ));
+        if !Self::sb_valid(&sb) {
+            return Err(BlockLevelError::InvalidSuperBlock);
         } else {
             let mut device = Device::new(path, sb.block_size, sb.nblocks)?;
             let sb_data = bincode::serialize(sb).unwrap();
@@ -108,10 +92,8 @@ impl FileSysSupport for FileSystem {
     fn mountfs(dev: Device) -> Result<Self, Self::Error> {
         let sb_data = dev.read_block(0)?;
         let sb = sb_data.deserialize_from::<SuperBlock>(0).unwrap();
-        if !FileSystem::sb_valid(&sb) {
-            return Err(FSError::InvalidSuperBlock(
-                "Invalid Super Block to initialize File System",
-            ));
+        if !Self::sb_valid(&sb) {
+            return Err(BlockLevelError::InvalidSuperBlock);
         } else {
             return Ok(Self {
                 device: Box::from(dev),
@@ -124,7 +106,8 @@ impl FileSysSupport for FileSystem {
     }
 }
 
-impl BlockSupport for FileSystem {
+/// Implementation of BlockSupport in BlockFileSystem
+impl BlockSupport for BlockFileSystem {
     fn b_get(&self, i: u64) -> Result<Block, Self::Error> {
         return Ok(self.device.read_block(i)?);
     }
@@ -138,11 +121,15 @@ impl BlockSupport for FileSystem {
         let sb = self.sup_get()?;
 
         if i > sb.ndatablocks {
-            return Err(FSError::BlockOperationError("Block to free out of index"));
+            return Err(BlockLevelError::InvalidBlockIndex(
+                "Block to free out of index",
+            ));
         }
         let mut bmap_block = BitwiseBlock::new(self.b_get(sb.bmapstart).unwrap());
         if !bmap_block.get_bit(i) {
-            return Err(FSError::BlockOperationError("Block is already free."));
+            return Err(BlockLevelError::InvalidBlockOperation(
+                "Block is already free.",
+            ));
         }
         bmap_block.put_bit(i, false);
         self.b_put(&bmap_block.return_block())?;
@@ -152,7 +139,7 @@ impl BlockSupport for FileSystem {
     fn b_zero(&mut self, i: u64) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
         if i > sb.ndatablocks {
-            return Err(FSError::BlockOperationError(
+            return Err(BlockLevelError::InvalidBlockIndex(
                 "Block index out of data block size.",
             ));
         }
@@ -183,7 +170,9 @@ impl BlockSupport for FileSystem {
                 }
             }
         }
-        return Err(FSError::BlockOperationError("No free block to allocate."));
+        return Err(BlockLevelError::InvalidBlockOperation(
+            "No free block to allocate.",
+        ));
     }
 
     fn sup_get(&self) -> Result<SuperBlock, Self::Error> {
@@ -202,31 +191,39 @@ impl BlockSupport for FileSystem {
     }
 }
 
-struct BitwiseBlock {
+/// Wrapper for `Block` to execute bitwise operations.
+pub struct BitwiseBlock {
+    /// block as boxed Block
     pub block: Box<Block>,
 }
 
 impl BitwiseBlock {
+    /// Create new BitwiseBlock, having given `Block`.
     pub fn new(block: Block) -> BitwiseBlock {
         return BitwiseBlock {
             block: Box::from(block),
         };
     }
 
+    /// Read byte value in `Block` buffer with *i*th position.
     pub fn get_byte(&self, i: u64) -> u8 {
         let mut raw_data = vec![0; 1];
         self.block.read_data(&mut raw_data, i).unwrap();
         return *raw_data.get(0).unwrap();
     }
 
+    /// Write value to *i*th byte in `Block` buffer.
     pub fn put_byte(&mut self, i: u64, val: u8) {
         let mut raw_data = vec![val];
         self.block.write_data(&mut raw_data, i).unwrap();
     }
 
+    /// Read bit value with index *i*
+    /// First read byte where bit is located.
+    /// With bitwise operation AND get value of bit on certain position.
     pub fn get_bit(&self, i: u64) -> bool {
-        let offset = i / 8;
-        let bit_offset = i % 8;
+        let offset = i / 8; // offset to read byte
+        let bit_offset = i % 8; // offset of bit in byte
         let byte = self.get_byte(offset);
         let mask: u8 = 1 << bit_offset;
         if (byte & mask) == 0 {
@@ -236,6 +233,10 @@ impl BitwiseBlock {
         }
     }
 
+    /// Write value to bit with index *i*.
+    /// If value of bit is same as to be changed then do not perform operation.
+    /// First read byte where bit is located.
+    /// With bitwise operations OR or XOR create new byte with changed bit value.
     pub fn put_bit(&mut self, i: u64, val: bool) {
         if self.get_bit(i) == val {
             return;
@@ -251,6 +252,7 @@ impl BitwiseBlock {
         }
     }
 
+    /// Return wrapped block back.
     pub fn return_block(self) -> Block {
         return *self.block;
     }
@@ -260,7 +262,7 @@ impl BitwiseBlock {
 /// automated tests when grading your assignment, indicate here the name of
 /// your file system data type so we can just use `FSName` instead of
 /// having to manually figure out your file system name.
-pub type FSName = FileSystem;
+pub type FSName = BlockFileSystem;
 
 // Here we define a submodule, called `my_tests`, that will contain your unit
 // tests for this module.
@@ -278,14 +280,11 @@ pub type FSName = FileSystem;
 #[cfg(test)]
 #[path = "../../api/fs-tests"]
 mod test_with_utils {
-    use std::path::{Path, PathBuf};
 
-    use cplfs_api::controller::Device;
     use cplfs_api::fs::{BlockSupport, FileSysSupport};
     use cplfs_api::types::{Block, SuperBlock};
 
-    use crate::a_block_support::{BitwiseBlock, FSName, FileSystem};
-    use std::borrow::Borrow;
+    use crate::a_block_support::{BitwiseBlock, FSName};
 
     #[path = "utils.rs"]
     mod utils;
@@ -324,18 +323,18 @@ mod test_with_utils {
 
     #[test]
     fn valid_super_block_test() {
-        assert!(!FileSystem::sb_valid(&SUPERBLOCK_BAD_INODES));
-        assert!(!FileSystem::sb_valid(&SUPERBLOCK_BAD_ORDER));
-        assert!(FileSystem::sb_valid(&SUPERBLOCK_GOOD));
+        assert!(!FSName::sb_valid(&SUPERBLOCK_BAD_INODES));
+        assert!(!FSName::sb_valid(&SUPERBLOCK_BAD_ORDER));
+        assert!(FSName::sb_valid(&SUPERBLOCK_GOOD));
     }
 
     #[test]
     fn mkfs_test() {
         let path = utils::disk_prep_path("mkfs_test", "image_file");
         //Some failing mkfs calls
-        assert!(FileSystem::mkfs(&path, &SUPERBLOCK_BAD_INODES).is_err());
-        assert!(FileSystem::mkfs(&path, &SUPERBLOCK_BAD_ORDER).is_err());
-        let fs = FileSystem::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
+        assert!(FSName::mkfs(&path, &SUPERBLOCK_BAD_INODES).is_err());
+        assert!(FSName::mkfs(&path, &SUPERBLOCK_BAD_ORDER).is_err());
+        let fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
 
         let dev = fs.unmountfs();
         utils::disk_destruct(dev);
@@ -350,7 +349,7 @@ mod test_with_utils {
         sb.write_data(&sb_data, 0).unwrap();
         device.write_block(&sb).unwrap();
 
-        assert!(FileSystem::mountfs(device).is_err());
+        assert!(FSName::mountfs(device).is_err());
 
         utils::disk_unprep_path(&path);
     }
@@ -364,7 +363,7 @@ mod test_with_utils {
         b.write_data(&a, 0).unwrap();
         device.write_block(&b).unwrap();
 
-        let fs = FileSystem::mountfs(device).unwrap();
+        let fs = FSName::mountfs(device).unwrap();
         let sb = fs
             .device
             .read_block(0)
@@ -380,7 +379,7 @@ mod test_with_utils {
     #[test]
     fn get_sup_block_test() {
         let path = utils::disk_prep_path("get_sup_block_test", "image_file");
-        let fs = FileSystem::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
+        let fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
         assert_eq!(fs.sup_get().unwrap(), SUPERBLOCK_GOOD);
         assert_ne!(fs.sup_get().unwrap(), SUPERBLOCK_BAD_INODES);
 
@@ -391,7 +390,7 @@ mod test_with_utils {
     #[test]
     fn put_get_block_test() {
         let path = utils::disk_prep_path("put_get_block_test", "image_file");
-        let mut fs = FileSystem::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
+        let mut fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
         let block = Block::new_zero(SUPERBLOCK_GOOD.datastart, SUPERBLOCK_GOOD.block_size);
         fs.b_put(&block).unwrap();
         assert_eq!(fs.b_get(SUPERBLOCK_GOOD.datastart).unwrap(), block);
@@ -403,7 +402,7 @@ mod test_with_utils {
     #[test]
     fn alloc_block_test() {
         let path = utils::disk_prep_path("alloc_block_test", "image_file");
-        let mut fs = FileSystem::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
+        let mut fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
         assert_eq!(fs.b_alloc().unwrap(), 0);
         assert_eq!(fs.b_alloc().unwrap(), 1);
         fs.b_free(0).unwrap();
@@ -418,7 +417,7 @@ mod test_with_utils {
     #[test]
     fn no_more_free_block_to_alloc_test() {
         let path = utils::disk_prep_path("no_more_free_block_to_alloc_test", "image_file");
-        let mut fs = FileSystem::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
+        let mut fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
         for _ in 0..SUPERBLOCK_GOOD.ndatablocks {
             fs.b_alloc().unwrap();
         }
@@ -433,7 +432,7 @@ mod test_with_utils {
     #[test]
     fn free_block_test() {
         let path = utils::disk_prep_path("free_block_test", "image_file");
-        let mut fs = FileSystem::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
+        let mut fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
         // index out of size
         assert!(fs.b_free(SUPERBLOCK_GOOD.ndatablocks + 2).is_err());
         // free already bree block
@@ -446,7 +445,7 @@ mod test_with_utils {
     #[test]
     fn sup_put_test() {
         let path = utils::disk_prep_path("sup_put_test", "image_file");
-        let mut fs = FileSystem::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
+        let mut fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
         // index out of size
         fs.sup_put(&SUPERBLOCK_BAD_INODES).unwrap();
         // free already bree block
@@ -486,30 +485,6 @@ mod test_with_utils {
         b_block.read_data(&mut raw_data, 0).unwrap();
         assert_eq!(format!("{:#010b}", raw_data.get(0).unwrap()), "0b10000001");
         assert_eq!(format!("{:#010b}", raw_data.get(1).unwrap()), "0b00000000");
-    }
-
-    #[test]
-    fn unit_test() {
-        //The below method set up the parent folder "a_parent_unique_name" within the root directory  of this solution crate
-        //Also delete the file "image_file" within this folder if it already exists, so that it does not interfere with any later `mkfs` calls (this is useful if your previous test run failed, and the file did not get deleted)
-        //*WARNING* !Make sure that this folder name "a_parent_unique_name" is actually unique over different tests, because tests are executed in parallel by default!
-        //Returns the concatenated path, so that you can use the path further on, e.g. when creating a `Device` or `FileSystem`
-
-        //! `let path = utils::disk_prep_path("a_parent_unique_name", "image_file");`
-
-        //Things you want to test go here (check my tests in the API folder for examples)
-        //! ...
-        //! ...
-
-        // If some disk actually created the file under `path` in your code, then you can uncomment the following call to clean it up:
-        //!  `utils::disk_unprep_path(&path);`
-        // This removes the image file and the parent directory at the end, so that no garbage is left in your file system
-        //*WARNING* if a Device `dev` is still in scope for the path `path`, then the above call will block (the device holds a lock on the memory-mapped file)
-        //You then have to use the following call instead:
-
-        //! `utils::disk_destruct(dev);`
-
-        //This makes the device go out of scope first, before tearing down the parent folder and image file, thereby avoiding deadlock
     }
 }
 
