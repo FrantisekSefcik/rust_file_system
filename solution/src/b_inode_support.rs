@@ -32,6 +32,8 @@ use cplfs_api::types::{
     Block, DInode, FType, Inode, InodeLike, SuperBlock, DINODE_SIZE, DIRECT_POINTERS,
 };
 use std::path::Path;
+use super::{a_block_support::BlockFileSystem};
+use crate::a_block_support::BlockLevelError;
 
 /// This error can occurs during manipulating with Block File System
 #[derive(Error, Debug)]
@@ -39,18 +41,15 @@ pub enum InodeLevelError {
     /// Error caused when `SuperBlock` to initialize `BlockFileSystem` is not valid.
     #[error("Invalid SuperBlock in BlockFileSystem initialization")]
     InvalidSuperBlock,
-    /// Error caused when operation to free or alloc a Block is not valid.
-    #[error("Invalid block operation: {0}")]
-    InvalidBlockOperation(&'static str),
     /// Error caused when Inode operation is not valid.
     #[error("Invalid inode operation: {0}")]
     InvalidInodeOperation(&'static str),
-    /// Error caused when index to access Block is out of datablock size.
-    #[error("Invalid block index: {0}")]
-    InvalidBlockIndex(&'static str),
     /// Error caused when performing controller operations.
     #[error("Controller error: {0}")]
     ControllerError(#[from] APIError),
+    /// Error caused when performing controller operations.
+    #[error("Block error: {0}")]
+    BlockError(#[from] BlockLevelError),
     ///This error has mostly been added for illustrative purposes, and can be useful for quickly drafting some code without thinking about the concrete error
     #[error(transparent)]
     Other(#[from] anyhow::Error),
@@ -59,7 +58,7 @@ pub enum InodeLevelError {
 /// `InodeFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `Device` to offer block-level abstraction to operate with File System.
 pub struct InodeFileSystem {
     /// Wrapped device as a boxed Device.
-    pub device: Box<Device>,
+    pub block_fs: BlockFileSystem
 }
 
 /// Implementation of FileSysSupport in BlockFileSystem
@@ -67,13 +66,7 @@ impl FileSysSupport for InodeFileSystem {
     type Error = InodeLevelError;
 
     fn sb_valid(sb: &SuperBlock) -> bool {
-        if sb.inodestart > sb.bmapstart || sb.bmapstart > sb.datastart {
-            return false;
-        }
-        if sb.nblocks < (2 + sb.ninodes / 2 + sb.ndatablocks) {
-            return false;
-        }
-        return true;
+        return BlockFileSystem::sb_valid(sb);
     }
 
     fn mkfs<P: AsRef<Path>>(path: P, sb: &SuperBlock) -> Result<Self, Self::Error> {
@@ -110,110 +103,50 @@ impl FileSysSupport for InodeFileSystem {
             }
 
             return Ok(Self {
-                device: Box::from(device),
+                block_fs: BlockFileSystem{ device: Box::from(device)},
             });
         }
     }
 
     fn mountfs(dev: Device) -> Result<Self, Self::Error> {
-        let sb_data = dev.read_block(0)?;
-        let sb = sb_data.deserialize_from::<SuperBlock>(0).unwrap();
-        if !Self::sb_valid(&sb) {
-            return Err(InodeLevelError::InvalidSuperBlock);
-        } else {
-            return Ok(Self {
-                device: Box::from(dev),
-            });
-        }
+        return Ok(Self {
+            block_fs: BlockFileSystem::mountfs(dev)?,
+        });
     }
 
     fn unmountfs(self) -> Device {
-        return *self.device;
+        return self.block_fs.unmountfs();
     }
 }
 
 /// Implementation of BlockSupport in BlockFileSystem
 impl BlockSupport for InodeFileSystem {
     fn b_get(&self, i: u64) -> Result<Block, Self::Error> {
-        return Ok(self.device.read_block(i)?);
+        return Ok(self.block_fs.b_get(i)?);
     }
 
     fn b_put(&mut self, b: &Block) -> Result<(), Self::Error> {
-        self.device.write_block(b)?;
-        return Ok(());
+        return Ok(self.block_fs.b_put(b)?);
     }
 
     fn b_free(&mut self, i: u64) -> Result<(), Self::Error> {
-        let sb = self.sup_get()?;
-
-        if i > sb.ndatablocks {
-            return Err(InodeLevelError::InvalidBlockIndex(
-                "Block to free out of index",
-            ));
-        }
-        let mut bmap_block = BitwiseBlock::new(self.b_get(sb.bmapstart).unwrap());
-        if !bmap_block.get_bit(i) {
-            return Err(InodeLevelError::InvalidBlockOperation(
-                "Block is already free.",
-            ));
-        }
-        bmap_block.put_bit(i, false);
-        self.b_put(&bmap_block.return_block())?;
-        return Ok(());
+        return Ok(self.block_fs.b_free(i)?);
     }
 
     fn b_zero(&mut self, i: u64) -> Result<(), Self::Error> {
-        let sb = self.sup_get()?;
-        if i > sb.ndatablocks {
-            return Err(InodeLevelError::InvalidBlockIndex(
-                "Block index out of data block size.",
-            ));
-        }
-        self.b_put(&Block::new_zero(sb.datastart + i, sb.block_size))?;
-        return Ok(());
+        return Ok(self.block_fs.b_zero(i)?);
     }
 
     fn b_alloc(&mut self) -> Result<u64, Self::Error> {
-        let sb = self.sup_get()?;
-        let mut bmap_block = BitwiseBlock::new(self.b_get(sb.bmapstart).unwrap());
-        let mask: u8 = 255;
-        let num_of_bmap_bytes = sb.ndatablocks / 8 + 1;
-        for i in 0..num_of_bmap_bytes {
-            let byte = bmap_block.get_byte(i);
-            if byte ^ mask > 0 {
-                let til_bit = if i == num_of_bmap_bytes - 1 {
-                    sb.ndatablocks % 8
-                } else {
-                    8
-                };
-                for x in 0..til_bit {
-                    if !bmap_block.get_bit(i * 8 + x) {
-                        bmap_block.put_bit(i * 8 + x, true);
-                        self.b_put(&bmap_block.return_block())?;
-                        self.b_zero(i * 8 + x)?;
-                        return Ok(i * 8 + x);
-                    }
-                }
-            }
-        }
-        return Err(InodeLevelError::InvalidBlockOperation(
-            "No free block to allocate.",
-        ));
+        return Ok(self.block_fs.b_alloc()?);
     }
 
     fn sup_get(&self) -> Result<SuperBlock, Self::Error> {
-        return Ok(self
-            .device
-            .read_block(0)?
-            .deserialize_from::<SuperBlock>(0)?);
+        return Ok(self.block_fs.sup_get()?);
     }
 
     fn sup_put(&mut self, sup: &SuperBlock) -> Result<(), Self::Error> {
-        let sb_data = bincode::serialize(sup).unwrap();
-        let mut block = self.b_get(0).unwrap();
-        block.write_data(&sb_data, 0)?;
-        self.b_put(&block)?;
-        return Ok(());
+        return Ok(self.block_fs.sup_put(sup)?);
     }
 }
 
@@ -255,7 +188,6 @@ impl InodeSupport for InodeFileSystem {
         }
         // iterate all blocks and free them
         for b in 0..(inode.get_size() as f64 / sb.block_size as f64).ceil() as u64 {
-            println!("block to free {}", inode.get_block(b) - sb.datastart);
             self.b_free(inode.get_block(b) - sb.datastart)?;
         }
         // put free inode
@@ -307,73 +239,6 @@ impl InodeSupport for InodeFileSystem {
         inode.disk_node.size = 0;
         self.i_put(inode)?;
         return Ok(());
-    }
-}
-
-/// Wrapper for `Block` to execute bitwise operations.
-pub struct BitwiseBlock {
-    /// block as boxed Block
-    pub block: Box<Block>,
-}
-
-impl BitwiseBlock {
-    /// Create new BitwiseBlock, having given `Block`.
-    pub fn new(block: Block) -> BitwiseBlock {
-        return BitwiseBlock {
-            block: Box::from(block),
-        };
-    }
-
-    /// Read byte value in `Block` buffer with *i*th position.
-    pub fn get_byte(&self, i: u64) -> u8 {
-        let mut raw_data = vec![0; 1];
-        self.block.read_data(&mut raw_data, i).unwrap();
-        return *raw_data.get(0).unwrap();
-    }
-
-    /// Write value to *i*th byte in `Block` buffer.
-    pub fn put_byte(&mut self, i: u64, val: u8) {
-        let mut raw_data = vec![val];
-        self.block.write_data(&mut raw_data, i).unwrap();
-    }
-
-    /// Read bit value with index *i*
-    /// First read byte where bit is located.
-    /// With bitwise operation AND get value of bit on certain position.
-    pub fn get_bit(&self, i: u64) -> bool {
-        let offset = i / 8; // offset to read byte
-        let bit_offset = i % 8; // offset of bit in byte
-        let byte = self.get_byte(offset);
-        let mask: u8 = 1 << bit_offset;
-        if (byte & mask) == 0 {
-            return false;
-        } else {
-            return true;
-        }
-    }
-
-    /// Write value to bit with index *i*.
-    /// If value of bit is same as to be changed then do not perform operation.
-    /// First read byte where bit is located.
-    /// With bitwise operations OR or XOR create new byte with changed bit value.
-    pub fn put_bit(&mut self, i: u64, val: bool) {
-        if self.get_bit(i) == val {
-            return;
-        }
-        let offset = i / 8;
-        let bit_offset = i % 8;
-        let byte = self.get_byte(offset);
-        let mask: u8 = 1 << bit_offset;
-        if val {
-            self.put_byte(offset, byte | mask)
-        } else {
-            self.put_byte(offset, byte ^ mask)
-        }
-    }
-
-    /// Return wrapped block back.
-    pub fn return_block(self) -> Block {
-        return *self.block;
     }
 }
 
