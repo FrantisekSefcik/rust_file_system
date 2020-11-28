@@ -181,10 +181,14 @@ impl InodeSupport for InodeFileSystem {
     fn i_free(&mut self, i: u64) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
         let inode = self.i_get(i)?; // get inode with index i
+        if inode.get_ft() == FType::TFree {
+            // if inode is already free
+            return Err(InodeLevelError::InvalidInodeOperation(
+               "Inode is already free."));
+        }
         if inode.get_nlink() > 0 {
             // if inode is still referenced
-            return Err(InodeLevelError::InvalidInodeOperation(
-               "Unable to free Inode because it is still referenced anywhere else in the file system."));
+            return Ok(());
         }
         // iterate all blocks and free them
         for b in 0..(inode.get_size() as f64 / sb.block_size as f64).ceil() as u64 {
@@ -369,6 +373,8 @@ mod test_with_utils {
         fs.i_put(&inode).unwrap();
         fs.i_put(&inode2).unwrap();
         fs.i_free(1).unwrap();
+        // if inode is free then error
+        assert!(fs.i_free(1).is_err());
         // blocks should be free
         assert!(fs.b_free(0).is_err());
         assert!(fs.b_free(1).is_err());
@@ -379,7 +385,8 @@ mod test_with_utils {
         assert_eq!(fs.i_alloc(FType::TFile).unwrap(), 1);
         assert_eq!(fs.i_get(1).unwrap().get_ft(), FType::TFile);
         assert!(fs.i_free(1).is_ok());
-        assert!(fs.i_free(2).is_err());
+        // not free because still has nlinks
+        assert!(fs.i_free(2).is_ok());
 
         let dev = fs.unmountfs();
         utils::disk_destruct(dev);

@@ -28,7 +28,7 @@ use cplfs_api::error_given::APIError;
 // If you want to import things from the API crate, do so as follows:
 use cplfs_api::fs::BlockSupport;
 use cplfs_api::fs::FileSysSupport;
-use cplfs_api::types::{Block, SuperBlock};
+use cplfs_api::types::{Block, SuperBlock, DINODE_SIZE};
 
 /// This error can occurs during manipulating with Block File System
 #[derive(Error, Debug)]
@@ -64,7 +64,7 @@ impl FileSysSupport for BlockFileSystem {
         if sb.inodestart > sb.bmapstart || sb.bmapstart > sb.datastart {
             return false;
         }
-        if sb.nblocks < (2 + sb.ninodes / 2 + sb.ndatablocks) {
+        if sb.nblocks < (2 + ((sb.ninodes * *DINODE_SIZE) as f64 / sb.block_size as f64).ceil() as u64 + sb.ndatablocks) {
             return false;
         }
         return true;
