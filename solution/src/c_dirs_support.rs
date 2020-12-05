@@ -10,13 +10,12 @@
 //!
 //! # Status
 //!
-//! **TODO**: Replace the question mark below with YES, NO, or PARTIAL to
 //! indicate the status of this assignment. If you want to tell something
 //! about this assignment to the grader, e.g., you have a bug you can't fix,
 //! or you want to explain your approach, write it down after the comments
 //! section. If you had no major issues and everything works, there is no need to write any comments.
 //!
-//! COMPLETED: ?
+//! COMPLETED: YES
 //!
 //! COMMENTS:
 //!
@@ -30,10 +29,9 @@ use cplfs_api::types::{Block, FType, Inode, SuperBlock, DirEntry, DInode, DIRECT
 use std::path::Path;
 use super::b_inode_support::InodeFileSystem;
 use crate::b_inode_support::InodeLevelError;
-use std::borrow::Borrow;
 use cplfs_api::error_given::APIError;
 
-/// This error can occurs during manipulating with Block File System
+/// This error can occurs during manipulating with Directory File System
 #[derive(Error, Debug)]
 pub enum DirectoryLevelError {
     /// Error caused when performing controller operations.
@@ -50,7 +48,9 @@ pub enum DirectoryLevelError {
     Other(#[from] anyhow::Error),
 }
 
-struct DirectoryFileSystem {
+/// `DirectoryFileSystem` wraps InodeFileSystem and add Directory support
+pub struct DirectoryFileSystem {
+    /// wrapped Inodes support layer
     inode_fs: InodeFileSystem,
 }
 
@@ -204,7 +204,7 @@ impl DirectorySupport for DirectoryFileSystem {
         // loop allocated blocks
         for b_i in 0 .. num_blocks {
             // wrap block to DirEntryBlock and look for DirEntry with name
-            let mut de_block = DirEntryBlock::new(self.b_get(inode.get_block(b_i))?);
+            let de_block = DirEntryBlock::new(self.b_get(inode.get_block(b_i))?);
             match de_block.lookup_name(name) {
                 Ok((de, offset)) => { // DirEntry exists in current block
                     return Ok((self.i_get(de.inum)?, b_i * sb.block_size + offset));
@@ -251,12 +251,12 @@ impl DirectorySupport for DirectoryFileSystem {
                             None => return Err(DirectoryLevelError::InvalidDirectoryOperation(
                                 "Unable to create DirEntry with given name and inum."
                             ))
-                        };
+                        }?;
                         // find corresponding linked inode and update nlink
                         let mut inode_df = self.i_get(inum)?;
                         inode_df.disk_node.nlink += 1;
-                        self.i_put(&inode_df);
-                        self.b_put(&de_block.return_block());
+                        self.i_put(&inode_df).unwrap();
+                        self.b_put(&de_block.return_block()).unwrap();
                         // update size of inode
                         if b_i * sb.block_size + o >= inode.get_size() {
                             inode.disk_node.size = inode.get_size() + *DIRENTRY_SIZE;
@@ -274,12 +274,12 @@ impl DirectorySupport for DirectoryFileSystem {
         match Self::new_de(inum, name) { // create DirEntry and save to block
             Some(de) => de_block.de_put(&de, 0),
             None => return Err(DirectoryLevelError::InvalidDirectoryOperation("Unable to create DirEntry."))
-        };
+        }?;
         // find corresponding linked inode and update nlink
         let mut inode_df = self.i_get(inum)?;
         inode_df.disk_node.nlink += 1;
-        self.i_put(&inode_df);
-        self.b_put(&de_block.return_block());
+        self.i_put(&inode_df).unwrap();
+        self.b_put(&de_block.return_block()).unwrap();
         // update size of inode
         inode.disk_node.size += num_blocks * sb.block_size + *DIRENTRY_SIZE;
         return Ok(num_blocks * sb.block_size);
@@ -348,16 +348,14 @@ impl DirEntryBlock {
 /// automated tests when grading your assignment, indicate here the name of
 /// your file system data type so we can just use `FSName` instead of
 /// having to manually figure out the name.
-/// **TODO**: replace the below type by the type of your file system
 pub type FSName = DirectoryFileSystem;
 
 #[cfg(test)]
 #[path = "../../api/fs-tests"]
 mod test_with_utils {
     use cplfs_api::fs::{BlockSupport, FileSysSupport, InodeSupport, DirectorySupport};
-    use cplfs_api::types::{DInode, FType, Inode, InodeLike, SuperBlock, DINODE_SIZE, DIRECT_POINTERS, DIRENTRY_SIZE, DirEntry, DIRNAME_SIZE, Block};
-    use crate::c_dirs_support::{FSName, DirectoryFileSystem, DirEntryBlock};
-    use std::borrow::Borrow;
+    use cplfs_api::types::{DInode, FType, Inode, InodeLike, SuperBlock, DIRECT_POINTERS, DIRENTRY_SIZE, DirEntry, DIRNAME_SIZE, Block};
+    use crate::c_dirs_support::{FSName, DirEntryBlock};
 
     #[path = "utils.rs"]
     mod utils;
@@ -378,7 +376,7 @@ mod test_with_utils {
     fn mkfs_dir_initialization_test() {
         let path = utils::disk_prep_path("mkfs_dir_initialization_test", "img");
 
-        let mut fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
+        let fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
 
         let inode = fs.i_get(1).unwrap();
 
@@ -417,7 +415,7 @@ mod test_with_utils {
     fn new_de_test() {
         let path = utils::disk_prep_path("new_de_test", "img");
 
-        let mut fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
+        let fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
         let ed = FSName::new_de(1, "test").unwrap();
 
         assert_eq!(FSName::get_name_str(&ed), "test");
@@ -430,8 +428,8 @@ mod test_with_utils {
     fn dir_entry_block_test() {
 
         let mut block = Block::new_zero(0, 50);
-        block.serialize_into(&FSName::new_de(1, "test1").unwrap(), 0);
-        block.serialize_into(&FSName::new_de(1, "test2").unwrap(), *DIRENTRY_SIZE);
+        block.serialize_into(&FSName::new_de(1, "test1").unwrap(), 0).unwrap();
+        block.serialize_into(&FSName::new_de(1, "test2").unwrap(), *DIRENTRY_SIZE).unwrap();
         let de_block = DirEntryBlock::new(block);
 
         assert!(de_block.find_free().is_err());
@@ -439,7 +437,7 @@ mod test_with_utils {
         let mut block = Block::new_zero(0, 50);
         let de1 = FSName::new_de(1, "test1").unwrap();
         let de2 = FSName::new_de(2, "test2").unwrap();
-        block.serialize_into(&de1, 0);
+        block.serialize_into(&de1, 0).unwrap();
         let mut de_block = DirEntryBlock::new(block);
         assert_eq!(de_block.find_free().unwrap(), *DIRENTRY_SIZE);
         assert_eq!(de_block.de_put(&de2, *DIRENTRY_SIZE).unwrap(), ());
@@ -482,7 +480,7 @@ mod test_with_utils {
                 direct_blocks: [5,0,0,0,0,0,0,0,0,0,0,0],
             }));
         assert_eq!(fs.dirlink(&mut inode, "testb", 4).unwrap(), *DIRENTRY_SIZE);
-        fs.i_put(&inode);
+        fs.i_put(&inode).unwrap();
         assert_eq!(fs.i_get(inode.get_inum()).unwrap(), inode);
         assert_eq!(fs.dirlookup(&inode, "testa").unwrap(), (fs.i_get(i_3).unwrap(), 0));
         assert_eq!(fs.dirlookup(&inode, "testb").unwrap(), (fs.i_get(i_4).unwrap(), *DIRENTRY_SIZE));
@@ -497,7 +495,7 @@ mod test_with_utils {
         let path = utils::disk_prep_path("dirlink_with_allocated_blocks_test", "img");
 
         let mut fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD).unwrap();
-        for i in (0..5) {
+        for i in 0..5 {
             assert_eq!(fs.b_alloc().unwrap(), i);
         }
         // update root inode
@@ -521,7 +519,7 @@ mod test_with_utils {
         // add direntries to root dir
         assert_eq!(fs.dirlink(&mut root_inode, "test2", 2).unwrap(), 0);
         assert_eq!(fs.dirlink(&mut root_inode, "test3", 3).unwrap(), *DIRENTRY_SIZE);
-        fs.i_put(&root_inode);
+        fs.i_put(&root_inode).unwrap();
         assert_eq!(fs.dirlookup(&root_inode, "test2").unwrap(), (fs.i_get(2).unwrap(), 0));
         assert_eq!(fs.dirlookup(&root_inode, "test3").unwrap(), (fs.i_get(3).unwrap(), *DIRENTRY_SIZE));
         assert!(fs.dirlookup(&root_inode, "testunexist").is_err());
