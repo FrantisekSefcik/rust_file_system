@@ -27,13 +27,13 @@ use cplfs_api::controller::Device;
 use cplfs_api::error_given::APIError;
 use thiserror::Error;
 
+use super::a_block_support::BlockFileSystem;
+use crate::a_block_support::BlockLevelError;
 use cplfs_api::fs::{BlockSupport, FileSysSupport, InodeSupport};
 use cplfs_api::types::{
     Block, DInode, FType, Inode, InodeLike, SuperBlock, DINODE_SIZE, DIRECT_POINTERS,
 };
 use std::path::Path;
-use super::{a_block_support::BlockFileSystem};
-use crate::a_block_support::BlockLevelError;
 
 /// This error can occurs during manipulating with Block File System
 #[derive(Error, Debug)]
@@ -58,7 +58,7 @@ pub enum InodeLevelError {
 /// `InodeFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `Device` to offer block-level abstraction to operate with File System.
 pub struct InodeFileSystem {
     /// Wrapped device as a boxed Device.
-    pub block_fs: BlockFileSystem
+    pub block_fs: BlockFileSystem,
 }
 
 /// Implementation of FileSysSupport in BlockFileSystem
@@ -103,7 +103,9 @@ impl FileSysSupport for InodeFileSystem {
             }
 
             return Ok(Self {
-                block_fs: BlockFileSystem{ device: Box::from(device)},
+                block_fs: BlockFileSystem {
+                    device: Box::from(device),
+                },
             });
         }
     }
@@ -184,7 +186,8 @@ impl InodeSupport for InodeFileSystem {
         if inode.get_ft() == FType::TFree {
             // if inode is already free
             return Err(InodeLevelError::InvalidInodeOperation(
-               "Inode is already free."));
+                "Inode is already free.",
+            ));
         }
         if inode.get_nlink() > 0 {
             // if inode is still referenced
@@ -391,6 +394,7 @@ mod test_with_utils {
         let dev = fs.unmountfs();
         utils::disk_destruct(dev);
     }
+
     #[test]
     fn truncate_inodes_test() {
         let path = utils::disk_prep_path("free_inodes_test", "image_file");

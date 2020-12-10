@@ -24,12 +24,15 @@ use anyhow::Result;
 use cplfs_api::controller::Device;
 use thiserror::Error;
 
-use cplfs_api::fs::{BlockSupport, FileSysSupport, InodeSupport, DirectorySupport};
-use cplfs_api::types::{Block, FType, Inode, SuperBlock, DirEntry, DInode, DIRECT_POINTERS, DIRENTRY_SIZE, DIRNAME_SIZE, InodeLike};
-use std::path::Path;
 use super::b_inode_support::InodeFileSystem;
 use crate::b_inode_support::InodeLevelError;
 use cplfs_api::error_given::APIError;
+use cplfs_api::fs::{BlockSupport, DirectorySupport, FileSysSupport, InodeSupport};
+use cplfs_api::types::{
+    Block, DInode, DirEntry, FType, Inode, InodeLike, SuperBlock, DIRECT_POINTERS, DIRENTRY_SIZE,
+    DIRNAME_SIZE,
+};
+use std::path::Path;
 
 /// This error can occurs during manipulating with Directory File System
 #[derive(Error, Debug)]
@@ -74,15 +77,25 @@ impl FileSysSupport for DirectoryFileSystem {
                 nlink: 1,
                 size: 0,
                 direct_blocks: [0; DIRECT_POINTERS as usize],
-            }
+            },
         ))?;
         return Ok(fs);
     }
 
     fn mountfs(dev: Device) -> Result<Self, Self::Error> {
-        return Ok(Self {
+        let mut fs = Self {
             inode_fs: InodeFileSystem::mountfs(dev)?,
-        });
+        };
+        fs.i_put(&Inode::new(
+            1,
+            DInode {
+                ft: FType::TDir,
+                nlink: 1,
+                size: 0,
+                direct_blocks: [0; DIRECT_POINTERS as usize],
+            },
+        ))?;
+        return Ok(fs);
     }
 
     fn unmountfs(self) -> Device {
@@ -147,20 +160,20 @@ impl InodeSupport for DirectoryFileSystem {
 
 impl DirectorySupport for DirectoryFileSystem {
     fn new_de(inum: u64, name: &str) -> Option<DirEntry> {
-        let mut de =  DirEntry::default();
+        let mut de = DirEntry::default();
         de.inum = inum;
         return match Self::set_name_str(&mut de, name) {
             Some(_) => Some(de), // name is correct
-            None => None
-        }
+            None => None,
+        };
     }
 
     fn get_name_str(de: &DirEntry) -> String {
         // find position of \0 and return collected string
-        return match  de.name.iter().position(|&x| x == '\0') {
-            Some(p) => de.name[0 .. p].iter().collect(),
-            None => de.name.iter().collect()
-        }
+        return match de.name.iter().position(|&x| x == '\0') {
+            Some(p) => de.name[0..p].iter().collect(),
+            None => de.name.iter().collect(),
+        };
     }
 
     fn set_name_str(de: &mut DirEntry, name: &str) -> Option<()> {
@@ -170,97 +183,126 @@ impl DirectorySupport for DirectoryFileSystem {
         }
         // if name is . or .. then it is OK, then save and return
         if name == "." || name == ".." {
-            for (i,ch) in name.chars().enumerate() {
+            for (i, ch) in name.chars().enumerate() {
                 de.name[i] = ch;
             }
-            de.name[1] = '\0';
+            de.name[name.len()] = '\0';
             return Some(());
         }
         // iterate over all chars and save to array
-        for (i,ch) in name.chars().enumerate() {
-            if !ch.is_alphanumeric() { return None; }
+        for (i, ch) in name.chars().enumerate() {
+            if !ch.is_alphanumeric() {
+                return None;
+            }
             de.name[i] = ch;
         }
-        if name.len() < DIRNAME_SIZE { // if name is shorter then 14 put \0 on the end
+        if name.len() < DIRNAME_SIZE {
+            // if name is shorter then 14 put \0 on the end
             de.name[name.len() as usize] = '\0';
         }
         return Some(());
     }
 
-    fn dirlookup(&self, inode: &Self::Inode, name: &str) -> Result<(Self::Inode, u64), Self::Error> {
+    fn dirlookup(
+        &self,
+        inode: &Self::Inode,
+        name: &str,
+    ) -> Result<(Self::Inode, u64), Self::Error> {
         let sb = self.sup_get()?;
-        if inode.get_ft() != FType::TDir { // error if inode is not Directory
+        if inode.get_ft() != FType::TDir {
+            // error if inode is not Directory
             return Err(DirectoryLevelError::InvalidDirectoryOperation(
-                "To look up DirEntry inode must be Directory type."))
+                "To look up DirEntry inode must be Directory type.",
+            ));
         }
-        if inode.get_size() == 0 { // error if dir has no entries
+        if inode.get_size() == 0 {
+            // error if dir has no entries
             return Err(DirectoryLevelError::InvalidDirectoryOperation(
-                "Directory has no entries."))
+                "Directory has no entries.",
+            ));
         }
 
         // number of allocated data blocks
         let num_blocks = (inode.get_size() as f64 / sb.block_size as f64).ceil() as u64;
 
         // loop allocated blocks
-        for b_i in 0 .. num_blocks {
+        for b_i in 0..num_blocks {
             // wrap block to DirEntryBlock and look for DirEntry with name
             let de_block = DirEntryBlock::new(self.b_get(inode.get_block(b_i))?);
             match de_block.lookup_name(name) {
-                Ok((de, offset)) => { // DirEntry exists in current block
+                Ok((de, offset)) => {
+                    // DirEntry exists in current block
                     return Ok((self.i_get(de.inum)?, b_i * sb.block_size + offset));
                 }
                 _ => {}
             }
         }
         return Err(DirectoryLevelError::InvalidDirectoryOperation(
-            "Directory has no entry with this name."))
+            "Directory has no entry with this name.",
+        ));
     }
 
-    fn dirlink(&mut self, inode: &mut Self::Inode, name: &str, inum: u64) -> Result<u64, Self::Error> {
-
-        if inode.get_ft() != FType::TDir { // error if inode is not directory type
+    fn dirlink(
+        &mut self,
+        inode: &mut Self::Inode,
+        name: &str,
+        inum: u64,
+    ) -> Result<u64, Self::Error> {
+        if inode.get_ft() != FType::TDir {
+            // error if inode is not directory type
             return Err(DirectoryLevelError::InvalidDirectoryOperation(
-                "Inode must be Directory type to save DirEntry."))
+                "Inode must be Directory type to save DirEntry.",
+            ));
         };
 
-        if self.i_get(inum).unwrap().get_ft() == FType::TFree { // error if one inode to be linked is Free
+        if self.i_get(inum).unwrap().get_ft() == FType::TFree {
+            // error if one inode to be linked is Free
             return Err(DirectoryLevelError::InvalidDirectoryOperation(
-                "Inode to by linked is not in use."))
+                "Inode to by linked is not in use.",
+            ));
         };
 
-        match self.dirlookup(inode, name) { // error if DirEntry with name already exist
-            Ok(_) => return Err(DirectoryLevelError::InvalidDirectoryOperation(
-                "DirEntry with same name is already in directory")),
+        match self.dirlookup(inode, name) {
+            // error if DirEntry with name already exist
+            Ok(_) => {
+                return Err(DirectoryLevelError::InvalidDirectoryOperation(
+                    "DirEntry with same name is already in directory",
+                ))
+            }
             _ => {}
         };
-
         let sb = self.sup_get()?;
         // number of allocated data blocks
         let num_blocks = (inode.get_size() as f64 / sb.block_size as f64).ceil() as u64;
         // if any allocated blocks then find free space for DirEntry
         if num_blocks > 0 {
             // loop allocated blocks
-            for b_i in 0 .. num_blocks {
-
+            for b_i in 0..num_blocks {
                 let mut de_block = DirEntryBlock::new(self.b_get(inode.get_block(b_i))?);
                 match de_block.find_free() {
-                    Ok(o) => { // free space for DirEntry was found in current block
-
-                        match Self::new_de(inum, name) { // create DirEntry and save to block
+                    Ok(o) => {
+                        // free space for DirEntry was found in current block
+                        // create DirEntry and save to block
+                        match Self::new_de(inum, name) {
                             Some(de) => de_block.de_put(&de, o),
-                            None => return Err(DirectoryLevelError::InvalidDirectoryOperation(
-                                "Unable to create DirEntry with given name and inum."
-                            ))
+                            None => {
+                                return Err(DirectoryLevelError::InvalidDirectoryOperation(
+                                    "Unable to create DirEntry with given name and inum.",
+                                ))
+                            }
                         }?;
                         // find corresponding linked inode and update nlink
-                        let mut inode_df = self.i_get(inum)?;
-                        inode_df.disk_node.nlink += 1;
-                        self.i_put(&inode_df).unwrap();
+                        if inum != inode.get_inum() {
+                            let mut inode_df = self.i_get(inum)?;
+                            inode_df.disk_node.nlink += 1;
+                            self.i_put(&inode_df).unwrap();
+                        }
                         self.b_put(&de_block.return_block()).unwrap();
                         // update size of inode
                         if b_i * sb.block_size + o >= inode.get_size() {
                             inode.disk_node.size = inode.get_size() + *DIRENTRY_SIZE;
                         }
+                        self.i_put(inode)?;
                         return Ok(b_i * sb.block_size + o);
                     }
                     _ => {}
@@ -271,23 +313,31 @@ impl DirectorySupport for DirectoryFileSystem {
         // when no free space was found in allocated blocks, we have to add new one
         inode.disk_node.direct_blocks[num_blocks as usize] = sb.datastart + self.b_alloc()?;
         let mut de_block = DirEntryBlock::new(self.b_get(inode.get_block(num_blocks))?);
-        match Self::new_de(inum, name) { // create DirEntry and save to block
+        match Self::new_de(inum, name) {
+            // create DirEntry and save to block
             Some(de) => de_block.de_put(&de, 0),
-            None => return Err(DirectoryLevelError::InvalidDirectoryOperation("Unable to create DirEntry."))
+            None => {
+                return Err(DirectoryLevelError::InvalidDirectoryOperation(
+                    "Unable to create DirEntry.",
+                ))
+            }
         }?;
         // find corresponding linked inode and update nlink
-        let mut inode_df = self.i_get(inum)?;
-        inode_df.disk_node.nlink += 1;
-        self.i_put(&inode_df).unwrap();
+        if inum != inode.get_inum() {
+            let mut inode_df = self.i_get(inum)?;
+            inode_df.disk_node.nlink += 1;
+            self.i_put(&inode_df)?;
+        }
         self.b_put(&de_block.return_block()).unwrap();
         // update size of inode
         inode.disk_node.size += num_blocks * sb.block_size + *DIRENTRY_SIZE;
+        self.i_put(inode)?;
         return Ok(num_blocks * sb.block_size);
     }
 }
 
 /// Wrapper for `Block` to execute `DirEntry` operations.
-struct DirEntryBlock {
+pub struct DirEntryBlock {
     /// block as boxed Block
     pub block: Box<Block>,
 }
@@ -312,8 +362,8 @@ impl DirEntryBlock {
             }
         }
         return Err(DirectoryLevelError::InvalidDirectoryOperation(
-            "No free space for DirEntry."
-        ))
+            "No free space for DirEntry.",
+        ));
     }
     /// Method to find DirEntry with given name inside of block
     /// It returns found DirEntry with it's offset otherwise returns error
@@ -323,13 +373,14 @@ impl DirEntryBlock {
         // loop over all DirEntries in block buffer
         for de_offset in (0..space_for_entries).step_by(*DIRENTRY_SIZE as usize) {
             let de = self.block.deserialize_from::<DirEntry>(de_offset)?;
-            if DirectoryFileSystem::get_name_str(&de) == name { // Check if DirEntry has corresponding name
+            if DirectoryFileSystem::get_name_str(&de) == name {
+                // Check if DirEntry has corresponding name
                 return Ok((de, de_offset));
             }
         }
         return Err(DirectoryLevelError::InvalidDirectoryOperation(
-            "No DirEntry found in block."
-        ))
+            "No DirEntry found in block.",
+        ));
     }
     /// Method to save given DirEntry to block buffer on position with given offset
     pub fn de_put(&mut self, de: &DirEntry, offset: u64) -> Result<(), DirectoryLevelError> {
@@ -337,12 +388,36 @@ impl DirEntryBlock {
         return Ok(());
     }
 
+    /// Method to free DirEntry with offset
+    /// set the `inum` of this entry to 0 and the name of the entry to all zeroes, i.e. to `"0".repeat(DIRNAME_SIZE)`
+    pub fn de_free(&mut self, offset: u64) -> Result<(), DirectoryLevelError> {
+        let mut de = DirEntry::default();
+        de.name = ['0'; DIRNAME_SIZE];
+        de.inum = 0;
+        self.block.serialize_into(&de, offset)?;
+        return Ok(());
+    }
+    /// Return number of non free entries in the block
+    pub fn entries_num(&self) -> Result<u64, DirectoryLevelError> {
+        let mut counter: u64 = 0;
+        let space_for_entries = self.block.len() - (self.block.len() % *DIRENTRY_SIZE);
+        for de_offset in (0..space_for_entries).step_by(*DIRENTRY_SIZE as usize) {
+            let de = self.block.deserialize_from::<DirEntry>(de_offset)?;
+            if de.inum != 0
+                && DirectoryFileSystem::get_name_str(&de) != "."
+                && DirectoryFileSystem::get_name_str(&de) != ".."
+            {
+                counter += 1;
+            }
+        }
+        return Ok(counter);
+    }
+
     /// Return wrapped block back.
     pub fn return_block(self) -> Block {
         return *self.block;
     }
 }
-
 
 /// You are free to choose the name for your file system. As we will use
 /// automated tests when grading your assignment, indicate here the name of
@@ -353,9 +428,12 @@ pub type FSName = DirectoryFileSystem;
 #[cfg(test)]
 #[path = "../../api/fs-tests"]
 mod test_with_utils {
-    use cplfs_api::fs::{BlockSupport, FileSysSupport, InodeSupport, DirectorySupport};
-    use cplfs_api::types::{DInode, FType, Inode, InodeLike, SuperBlock, DIRECT_POINTERS, DIRENTRY_SIZE, DirEntry, DIRNAME_SIZE, Block};
-    use crate::c_dirs_support::{FSName, DirEntryBlock};
+    use crate::c_dirs_support::{DirEntryBlock, FSName};
+    use cplfs_api::fs::{BlockSupport, DirectorySupport, FileSysSupport, InodeSupport};
+    use cplfs_api::types::{
+        Block, DInode, DirEntry, FType, Inode, InodeLike, SuperBlock, DIRECT_POINTERS,
+        DIRENTRY_SIZE, DIRNAME_SIZE,
+    };
 
     #[path = "utils.rs"]
     mod utils;
@@ -380,23 +458,28 @@ mod test_with_utils {
 
         let inode = fs.i_get(1).unwrap();
 
-        assert_eq!(inode, Inode::new(
-            1,
-            DInode {
-                ft: FType::TDir,
-                nlink: 1,
-                size: 0,
-                direct_blocks: [0; DIRECT_POINTERS as usize],
-            }
-        ));
+        assert_eq!(
+            inode,
+            Inode::new(
+                1,
+                DInode {
+                    ft: FType::TDir,
+                    nlink: 1,
+                    size: 0,
+                    direct_blocks: [0; DIRECT_POINTERS as usize],
+                }
+            )
+        );
         let dev = fs.unmountfs();
         utils::disk_destruct(dev);
     }
 
     #[test]
     fn set_get_name_str_test() {
-
-        let ed = &mut DirEntry{inum: 0, name: ['c'; DIRNAME_SIZE]};
+        let ed = &mut DirEntry {
+            inum: 0,
+            name: ['c'; DIRNAME_SIZE],
+        };
         // test bad inputs
         assert!(FSName::set_name_str(ed, "").is_none());
         assert!(FSName::set_name_str(ed, "LongStringToBeName").is_none());
@@ -426,10 +509,13 @@ mod test_with_utils {
 
     #[test]
     fn dir_entry_block_test() {
-
         let mut block = Block::new_zero(0, 50);
-        block.serialize_into(&FSName::new_de(1, "test1").unwrap(), 0).unwrap();
-        block.serialize_into(&FSName::new_de(1, "test2").unwrap(), *DIRENTRY_SIZE).unwrap();
+        block
+            .serialize_into(&FSName::new_de(1, "test1").unwrap(), 0)
+            .unwrap();
+        block
+            .serialize_into(&FSName::new_de(1, "test2").unwrap(), *DIRENTRY_SIZE)
+            .unwrap();
         let de_block = DirEntryBlock::new(block);
 
         assert!(de_block.find_free().is_err());
@@ -444,7 +530,10 @@ mod test_with_utils {
         assert!(de_block.find_free().is_err());
 
         assert_eq!(de_block.lookup_name("test1").unwrap(), (de1, 0));
-        assert_eq!(de_block.lookup_name("test2").unwrap(), (de2, *DIRENTRY_SIZE));
+        assert_eq!(
+            de_block.lookup_name("test2").unwrap(),
+            (de2, *DIRENTRY_SIZE)
+        );
         assert!(de_block.lookup_name("terer").is_err());
     }
 
@@ -461,29 +550,43 @@ mod test_with_utils {
         assert_eq!(i_3, 3);
         assert_eq!(i_4, 4);
         let mut inode = fs.i_get(i_2).unwrap();
-        assert_eq!(inode, Inode::new(
-            2,
-            DInode {
-                ft: FType::TDir,
-                nlink: 0,
-                size: 0,
-                direct_blocks: [0; DIRECT_POINTERS as usize],
-            }));
+        assert_eq!(
+            inode,
+            Inode::new(
+                2,
+                DInode {
+                    ft: FType::TDir,
+                    nlink: 0,
+                    size: 0,
+                    direct_blocks: [0; DIRECT_POINTERS as usize],
+                }
+            )
+        );
         // link inode 3 to inode 2
         assert_eq!(fs.dirlink(&mut inode, "testa", 3).unwrap(), 0);
-        assert_eq!(inode, Inode::new(
-            2,
-            DInode {
-                ft: FType::TDir,
-                nlink: 0,
-                size: *DIRENTRY_SIZE,
-                direct_blocks: [5,0,0,0,0,0,0,0,0,0,0,0],
-            }));
+        assert_eq!(
+            inode,
+            Inode::new(
+                2,
+                DInode {
+                    ft: FType::TDir,
+                    nlink: 0,
+                    size: *DIRENTRY_SIZE,
+                    direct_blocks: [5, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                }
+            )
+        );
         assert_eq!(fs.dirlink(&mut inode, "testb", 4).unwrap(), *DIRENTRY_SIZE);
         fs.i_put(&inode).unwrap();
         assert_eq!(fs.i_get(inode.get_inum()).unwrap(), inode);
-        assert_eq!(fs.dirlookup(&inode, "testa").unwrap(), (fs.i_get(i_3).unwrap(), 0));
-        assert_eq!(fs.dirlookup(&inode, "testb").unwrap(), (fs.i_get(i_4).unwrap(), *DIRENTRY_SIZE));
+        assert_eq!(
+            fs.dirlookup(&inode, "testa").unwrap(),
+            (fs.i_get(i_3).unwrap(), 0)
+        );
+        assert_eq!(
+            fs.dirlookup(&inode, "testb").unwrap(),
+            (fs.i_get(i_4).unwrap(), *DIRENTRY_SIZE)
+        );
         assert!(fs.dirlookup(&inode, "testunexist").is_err());
 
         let dev = fs.unmountfs();
@@ -505,8 +608,10 @@ mod test_with_utils {
                 ft: FType::TDir,
                 nlink: 1,
                 size: (1.2 * SUPERBLOCK_GOOD.block_size as f64) as u64,
-                direct_blocks: [5,6,0,0,0,0,0,0,0,0,0,0],
-            })).unwrap();
+                direct_blocks: [5, 6, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            },
+        ))
+        .unwrap();
         let mut root_inode = fs.i_get(1).unwrap();
 
         // allocate 2,3,4 inodes
@@ -518,10 +623,19 @@ mod test_with_utils {
         assert_eq!(i_4, 4);
         // add direntries to root dir
         assert_eq!(fs.dirlink(&mut root_inode, "test2", 2).unwrap(), 0);
-        assert_eq!(fs.dirlink(&mut root_inode, "test3", 3).unwrap(), *DIRENTRY_SIZE);
+        assert_eq!(
+            fs.dirlink(&mut root_inode, "..", 3).unwrap(),
+            *DIRENTRY_SIZE
+        );
         fs.i_put(&root_inode).unwrap();
-        assert_eq!(fs.dirlookup(&root_inode, "test2").unwrap(), (fs.i_get(2).unwrap(), 0));
-        assert_eq!(fs.dirlookup(&root_inode, "test3").unwrap(), (fs.i_get(3).unwrap(), *DIRENTRY_SIZE));
+        assert_eq!(
+            fs.dirlookup(&root_inode, "test2").unwrap(),
+            (fs.i_get(2).unwrap(), 0)
+        );
+        assert_eq!(
+            fs.dirlookup(&root_inode, "..").unwrap(),
+            (fs.i_get(3).unwrap(), *DIRENTRY_SIZE)
+        );
         assert!(fs.dirlookup(&root_inode, "testunexist").is_err());
 
         let dev = fs.unmountfs();

@@ -64,7 +64,10 @@ impl FileSysSupport for BlockFileSystem {
         if sb.inodestart > sb.bmapstart || sb.bmapstart > sb.datastart {
             return false;
         }
-        if sb.nblocks < (2 + ((sb.ninodes * *DINODE_SIZE) as f64 / sb.block_size as f64).ceil() as u64 + sb.ndatablocks) {
+        if sb.nblocks
+            < (2 + ((sb.ninodes * *DINODE_SIZE) as f64 / sb.block_size as f64).ceil() as u64
+                + sb.ndatablocks)
+        {
             return false;
         }
         return true;
@@ -266,7 +269,6 @@ pub type FSName = BlockFileSystem;
 
 // Here we define a submodule, called `my_tests`, that will contain your unit
 // tests for this module.
-// **TODO** define your own tests here. I have written down one test as an example of the syntax.
 // You can define more tests in different modules, and change the name of this module
 //
 // The `test` in the `#[cfg(test)]` annotation ensures that this code is only compiled when we're testing the code.
