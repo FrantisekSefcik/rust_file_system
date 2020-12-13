@@ -29,7 +29,7 @@ use thiserror::Error;
 use crate::b_inode_support::{InodeLevelError, InodeFileSystem};
 use cplfs_api::error_given::APIError;
 use cplfs_api::fs::{FileSysSupport, InodeSupport, BlockSupport, InodeRWSupport};
-use cplfs_api::types::{SuperBlock, Inode, DInode, FType, DIRECT_POINTERS, Block, Buffer, InodeLike};
+use cplfs_api::types::{SuperBlock, Inode, FType, Block, Buffer, InodeLike};
 use std::path::Path;
 use cplfs_api::controller::Device;
 
@@ -66,35 +66,15 @@ impl FileSysSupport for InodeRWFileSystem {
     }
 
     fn mkfs<P: AsRef<Path>>(path: P, sb: &SuperBlock) -> Result<Self, Self::Error> {
-        let mut fs = Self {
+        Ok(Self {
             inode_fs: InodeFileSystem::mkfs(path, sb)?,
-        };
-        fs.i_put(&Inode::new(
-            1,
-            DInode {
-                ft: FType::TDir,
-                nlink: 1,
-                size: 0,
-                direct_blocks: [0; DIRECT_POINTERS as usize],
-            },
-        ))?;
-        return Ok(fs);
+        })
     }
 
     fn mountfs(dev: Device) -> Result<Self, Self::Error> {
-        let mut fs = Self {
+        Ok( Self {
             inode_fs: InodeFileSystem::mountfs(dev)?,
-        };
-        fs.i_put(&Inode::new(
-            1,
-            DInode {
-                ft: FType::TDir,
-                nlink: 1,
-                size: 0,
-                direct_blocks: [0; DIRECT_POINTERS as usize],
-            },
-        ))?;
-        return Ok(fs);
+        })
     }
 
     fn unmountfs(self) -> Device {
@@ -189,7 +169,7 @@ impl InodeRWSupport for InodeRWFileSystem {
                 start_block_offset + (n - buff_offset)
             };
             // get current block
-            let mut block = self.b_get(inode.get_block(b_i))?;
+            let block = self.b_get(inode.get_block(b_i))?;
             // Read and Write data to buffer
             let mut tmp_data = vec![0; (end_block_offset - start_block_offset) as usize];
             block.read_data(&mut tmp_data, start_block_offset)?;
@@ -239,7 +219,7 @@ impl InodeRWSupport for InodeRWFileSystem {
             let mut tmp_data = vec![0; (end_block_offset - start_block_offset) as usize];
             buf.read_data(&mut tmp_data, buff_offset)?;
             block.write_data(&tmp_data, start_block_offset)?;
-            self.b_put(&block);
+            self.b_put(&block)?;
             // Update buffer start offset and block start offset
             buff_offset += end_block_offset - start_block_offset;
             start_block_offset = 0;
@@ -298,7 +278,7 @@ mod test_with_utils {
         my_fs.b_put(&b3).unwrap();
         let b4 = utils::n_block(7, BLOCK_SIZE, 4);
         my_fs.b_put(&b4).unwrap();
-        let mut i2 = Inode::new(
+        let i2 = Inode::new(
             2,
             DInode {
                 ft: FType::TFile,

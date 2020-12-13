@@ -56,27 +56,516 @@
 //!
 //! # Status
 //!
-//! **TODO**: Replace the question mark below with YES, NO, or PARTIAL to
 //! indicate the status of this assignment. If you want to tell something
 //! about this assignment to the grader, e.g., you have a bug you can't fix,
 //! or you want to explain your approach, write it down after the comments
 //! section. If you had no major issues and everything works, there is no need to write any comments.
 //!
-//! COMPLETED: ?
+//! COMPLETED: YES
 //!
 //! COMMENTS:
 //!
 //! ...
 //!
 
+use crate::b_inode_support::InodeLevelError;
+use cplfs_api::fs::{FileSysSupport, BlockSupport, InodeSupport, InodeRWSupport, InodeCacheSupport};
+use cplfs_api::controller::Device;
+use std::path::Path;
+use cplfs_api::types::{SuperBlock, Block, Inode, FType, Buffer, InodeLike, DIRECT_POINTERS, DInode};
+use crate::e_inode_RW_support::{InodeRWFileSystem, InodeRWError};
+use std::cell::{RefCell, Ref, RefMut};
+use std::rc::Rc;
+
+use thiserror::Error;
+use std::borrow::{BorrowMut, Borrow};
+use std::collections::BTreeMap;
+
+/// asndfjasd
+#[derive(Debug, Default, PartialEq, Eq, Clone)]
+pub struct InodeCached(Rc<RefCell<Inode>>);
+
+impl InodeCached {
+    fn new(inode: Inode) -> InodeCached {
+        return Self(Rc::new(RefCell::new(inode)));
+    }
+
+    fn get_inode(&self) -> Ref<Inode> {
+        (*self.0).borrow()
+    }
+    fn get_inode_mut(&self) -> RefMut<Inode> {
+        (*self.0).borrow_mut()
+    }
+
+    fn increase_nlink(&self) -> Option<u16> {
+        (*self.0).borrow_mut().disk_node.nlink += 1;
+        Some((*self.0).borrow().disk_node.nlink)
+    }
+
+    fn decrease_nlink(&self) -> Option<u16> {
+        if (*self.0).borrow().disk_node.nlink == 0 {
+            return None;
+        }
+        (*self.0).borrow_mut().disk_node.nlink -= 1;
+        Some((*self.0).borrow().disk_node.nlink)
+    }
+
+    fn set_size(&self, size: u64) {
+        (*self.0).borrow_mut().disk_node.size = size;
+    }
+
+    fn set_block(&self, i: u64, bnum: u64) -> Option<()> {
+        if DIRECT_POINTERS <= i {
+            return None;
+        }
+        (*self.0).borrow_mut().disk_node.direct_blocks[i as usize] = bnum;
+        Some(())
+    }
+
+}
+
+impl InodeLike for InodeCached {
+    fn new(inum: u64, ft: &FType, nlink: u64, size: u64, blocks: &[u64]) -> Option<Self> {
+        if nlink > u16::MAX as u64 {
+            return None;
+        }
+        if blocks.len() > DIRECT_POINTERS as usize {
+            return None;
+        }
+
+        let mut db = [0; DIRECT_POINTERS as usize];
+        for i in 0..blocks.len() {
+            db[i] = blocks[i];
+        }
+
+        let di = DInode {
+            ft: *ft,
+            nlink: nlink as u16,
+            size,
+            direct_blocks: db,
+        };
+        Some(InodeCached::new(Inode::new(inum, di)))
+    }
+
+    fn get_ft(&self) -> FType {
+        (*self.0).borrow().disk_node.ft
+    }
+    fn get_nlink(&self) -> u64 {
+        (*self.0).borrow().disk_node.nlink as u64
+    }
+    fn get_size(&self) -> u64 {
+        (*self.0).borrow().disk_node.size
+    }
+    fn get_block(&self, i: u64) -> u64 {
+        if DIRECT_POINTERS <= i {
+            return 0;
+        }
+        (*self.0).borrow().disk_node.direct_blocks[i as usize]
+    }
+
+    fn get_inum(&self) -> u64 {
+        (*self.0).borrow().inum
+    }
+}
+
+
+/// This error can occurs during manipulating with Directory File System
+#[derive(Error, Debug)]
+pub enum InodeCacheError {
+    /// Error caused when performing inode cache operations.
+    #[error("Inode cache error: {0}")]
+    InodeCacheError(&'static str),
+    /// Error caused when performing inode operations.
+    #[error("Inode error: {0}")]
+    InodeError(#[from] InodeLevelError),
+    /// Error caused when performing inode read write operations.
+    #[error("Inode error: {0}")]
+    InodeRWError(#[from] InodeRWError),
+    ///This error has mostly been added for illustrative purposes, and can be useful for quickly drafting some code without thinking about the concrete error
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+}
+
+/// `DirectoryFileSystem` wraps InodeFileSystem and add Directory support
+pub struct InodeCacheFileSystem {
+    /// wrapped Inodes support layer
+    inode_fs: InodeRWFileSystem,
+    inode_cache: Box<BTreeMap<u64, InodeCached>>,
+    nb_cache_entries: u64,
+}
+
+/// `InodeFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `Device` to offer block-level abstraction to operate with File System.
+/// Implementation of FileSysSupport in BlockFileSystem
+impl FileSysSupport for InodeCacheFileSystem {
+    type Error = InodeCacheError;
+
+    fn sb_valid(sb: &SuperBlock) -> bool {
+        return InodeRWFileSystem::sb_valid(sb);
+    }
+
+    fn mkfs<P: AsRef<Path>>(path: P, sb: &SuperBlock) -> Result<Self, Self::Error> {
+        return Ok(Self {
+            inode_fs: InodeRWFileSystem::mkfs(path, sb)?,
+            inode_cache: Box::from(BTreeMap::new()),
+            nb_cache_entries: 5,
+        });
+    }
+
+    fn mountfs(dev: Device) -> Result<Self, Self::Error> {
+        return Ok(Self {
+            inode_fs: InodeRWFileSystem::mountfs(dev)?,
+            inode_cache: Box::from(BTreeMap::new()),
+            nb_cache_entries: 5,
+        });
+    }
+
+    fn unmountfs(self) -> Device {
+        return self.inode_fs.unmountfs();
+    }
+}
+
+/// Implementation of BlockSupport in BlockFileSystem
+impl BlockSupport for InodeCacheFileSystem {
+    fn b_get(&self, i: u64) -> Result<Block, Self::Error> {
+        return Ok(self.inode_fs.b_get(i)?);
+    }
+
+    fn b_put(&mut self, b: &Block) -> Result<(), Self::Error> {
+        return Ok(self.inode_fs.b_put(b)?);
+    }
+
+    fn b_free(&mut self, i: u64) -> Result<(), Self::Error> {
+        return Ok(self.inode_fs.b_free(i)?);
+    }
+
+    fn b_zero(&mut self, i: u64) -> Result<(), Self::Error> {
+        return Ok(self.inode_fs.b_zero(i)?);
+    }
+
+    fn b_alloc(&mut self) -> Result<u64, Self::Error> {
+        return Ok(self.inode_fs.b_alloc()?);
+    }
+
+    fn sup_get(&self) -> Result<SuperBlock, Self::Error> {
+        return Ok(self.inode_fs.sup_get()?);
+    }
+
+    fn sup_put(&mut self, sup: &SuperBlock) -> Result<(), Self::Error> {
+        return Ok(self.inode_fs.sup_put(sup)?);
+    }
+}
+
+impl InodeSupport for InodeCacheFileSystem {
+    type Inode = InodeCached;
+
+    fn i_get(&self, i: u64) -> Result<Self::Inode, Self::Error> {
+        // Get inode from cache if is cached otherwise return error
+        return if self.is_cached(i) {
+            Ok(self.inode_cache.get(&i).unwrap().clone())
+        } else {
+            Err(Self::Error::InodeCacheError(
+                "Inode is not in cache."
+            ))
+        }
+    }
+
+    fn i_put(&mut self, ino: &Self::Inode) -> Result<(), Self::Error> {
+        return Ok(self.inode_fs.i_put(ino.get_inode().borrow())?);
+    }
+
+    fn i_free(&mut self, i: u64) -> Result<(), Self::Error> {
+        // if inode is in cache
+        if self.inode_cache.contains_key(&i) {
+            let cached_inode = self.inode_cache.get(&i).unwrap();
+            // - Error if inode is still referenced
+            if Rc::strong_count(&cached_inode.0) > 1 {
+                return Err(Self::Error::InodeCacheError("Inode to be free is still referenced."));
+            }
+            // - Remove inode form cache and free inode on disk
+            let cached_inode = self.inode_cache.remove(&i).unwrap();
+            Ok(self.inode_fs.i_free(cached_inode.get_inum())?)
+        } else { // if inode is not in cache only free inode on disk
+            Ok(self.inode_fs.i_free(i)?)
+        }
+
+
+    }
+
+    fn i_alloc(&mut self, ft: FType) -> Result<u64, Self::Error> {
+        // first allocate new inode
+        let i = self.inode_fs.i_alloc(ft)?;
+        let inode = InodeCached::new(self.inode_fs.i_get(i)?);
+        // if cache is full then create new space to cache inode
+        if self.inode_cache.len() as u64 >= self.nb_cache_entries {
+            let mut a: u64 = 0; // TODO finish removing from cache
+            for (i, c_i) in self.inode_cache.iter() {
+                if Rc::strong_count(&c_i.0) <= 1 {
+                    a = *i;
+                    break;
+                }
+            }
+            let c = self.inode_cache.remove(&a).unwrap();
+            self.i_put(c.borrow())?;
+        }
+        self.inode_cache.insert(i, inode);
+        return Ok(i);
+    }
+
+    fn i_trunc(&mut self, inode: &mut Self::Inode) -> Result<(), Self::Error> {
+        return Ok(self.inode_fs.i_trunc(&mut inode.get_inode_mut())?);
+    }
+}
+
+impl InodeRWSupport for InodeCacheFileSystem {
+    fn i_read(&self, inode: &Self::Inode, buf: &mut Buffer, off: u64, n: u64) -> Result<u64, Self::Error> {
+        Ok(self.inode_fs.i_read(inode.get_inode().borrow(), buf, off, n)?)
+    }
+
+    fn i_write(&mut self, inode: &mut Self::Inode, buf: &Buffer, off: u64, n: u64) -> Result<(), Self::Error> {
+        Ok(self.inode_fs.i_write(inode.get_inode_mut().borrow_mut(), buf, off, n)?)
+    }
+}
+
+
+
+impl InodeCacheSupport for InodeCacheFileSystem {
+    fn i_get_mut(&mut self, i: u64) -> Result<InodeCached, Self::Error> {
+        // return inode if is cached
+        if self.is_cached(i) {
+            return Ok(self.inode_cache.get(&i).unwrap().clone());
+        }
+        // read inode from disk
+        let inode = InodeCached::new(self.inode_fs.i_get(i)?);
+        let mut a: u64 = 0;
+        // if cache is full free place for new InodeCached
+        if self.inode_cache.len() as u64 >= self.nb_cache_entries {
+            // iterate over all elements until anyone is without references
+            for (i, c_i) in self.inode_cache.iter() {
+                if Rc::strong_count(&c_i.0) <= 1 {
+                    a = *i;
+                    break;
+                }
+            }
+            // remove from cache and write to disk
+            let c = self.inode_cache.remove(&a).unwrap();
+            self.i_put(c.borrow())?;
+        }
+        // now we can insert new loaded inode to cache
+        self.inode_cache.insert(i, inode);
+        return Ok(self.inode_cache.get(&i).unwrap().clone());
+    }
+
+    fn is_cached(&self, inum: u64) -> bool {
+        self.inode_cache.contains_key(&inum)
+    }
+
+    fn mkfs_cached<P: AsRef<Path>>(path: P, sb: &SuperBlock, nb_cache_entries: u64) -> Result<Self, Self::Error> {
+        return Ok(Self {
+            inode_fs: InodeRWFileSystem::mkfs(path, sb)?,
+            inode_cache: Box::from(BTreeMap::new()),
+            nb_cache_entries,
+        });
+    }
+
+    fn mountfs_cached(dev: Device, nb_cache_entries: u64) -> Result<Self, Self::Error> {
+        return Ok(Self {
+            inode_fs: InodeRWFileSystem::mountfs(dev)?,
+            inode_cache: Box::from(BTreeMap::new()),
+            nb_cache_entries,
+        });
+    }
+}
+
 /// You are free to choose the name for your file system. As we will use
 /// automated tests when grading your assignment, indicate here the name of
 /// your file system data type so we can just use `FSName` instead of
 /// having to manually figure out the name.
-/// **TODO**: replace the below type by the type of your file system
-pub type FSName = ();
+pub type FSName = InodeCacheFileSystem;
 
-// **TODO** define your own tests here.
+#[cfg(test)]
+#[path = "../../api/fs-tests"]
+mod test_with_utils {
+    use cplfs_api::fs::{FileSysSupport, InodeSupport, InodeCacheSupport};
+    use cplfs_api::types::{DInode, FType, Inode, InodeLike, SuperBlock};
+
+    use crate::g_caching_inodes::{FSName, InodeCached};
+    use std::rc::Rc;
+    use std::collections::BTreeMap;
+
+    #[path = "utils.rs"]
+    mod utils;
+
+    static BLOCK_SIZE: u64 = 300;
+    static NBLOCKS: u64 = 11;
+    static SUPERBLOCK_GOOD: SuperBlock = SuperBlock {
+        block_size: BLOCK_SIZE,
+        nblocks: NBLOCKS,
+        ninodes: 6,
+        inodestart: 1,
+        ndatablocks: 6,
+        bmapstart: 4,
+        datastart: 5,
+    };
+
+    static BLOCK_SIZE_C: u64 = 1000; //make blocks somewhat smaller on this one, should still be sufficient for a reasonable inode
+    static SUPERBLOCK_GOOD_C: SuperBlock = SuperBlock {
+            block_size: BLOCK_SIZE_C,
+            nblocks: NBLOCKS,
+            ninodes: 10,
+            inodestart: 1,
+            ndatablocks: 6,
+            bmapstart: 4,
+            datastart: 5,
+        };
+
+    #[test]
+    fn inode_cached_test() {
+        let i1 = InodeCached::new(Inode::new(
+            2,
+            DInode {
+                ft: FType::TFile,
+                nlink: 0,
+                size: (2.5 * (BLOCK_SIZE as f32)) as u64,
+                direct_blocks: [5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            }
+        ));
+        assert_eq!(i1.get_size(), (2.5 * (BLOCK_SIZE as f32)) as u64);
+        assert_eq!(i1.get_nlink(), 0);
+        assert_eq!(i1.get_block(0), 5);
+        assert_eq!(i1.get_inum(), 2);
+        assert_eq!(Rc::strong_count(&i1.0), 1);
+        // add another copy to the scope
+        let i2 = i1.clone();
+        assert_eq!(i2.get_size(), (2.5 * (BLOCK_SIZE as f32)) as u64);
+        assert_eq!(i2.get_nlink(), 0);
+        assert_eq!(Rc::strong_count(&i1.0), 2);
+        {
+            let _i3 = i1.clone();
+            assert_eq!(Rc::strong_count(&i1.0), 3);
+        }
+        // i3 is now out of scope
+        assert_eq!(Rc::strong_count(&i1.0), 2);
+
+        // test manipulation with nlink
+        i1.increase_nlink();
+        i2.increase_nlink();
+        assert_eq!(i1.get_nlink(), 2);
+        i2.decrease_nlink();
+        assert_eq!(i1.get_nlink(), 1);
+
+        // test setting size
+        let i3 = i1.clone();
+        i3.set_size(900);
+        assert_eq!(i1.get_size(), 900);
+
+        // test adding of block
+        i3.set_block(3, 8);
+        assert_eq!(i1.get_block(3), 8);
+    }
+
+    #[test]
+    fn btree_test() {
+        let mut map = BTreeMap::new();
+        map.insert(1, "a");
+        map.insert(2, "b");
+        map.insert(3, "c");
+        assert_eq!(map.contains_key(&1), true);
+        assert_eq!(map.contains_key(&4), false);
+        assert_eq!(map.get(&1), Some(&"a"));
+    }
+
+    #[test]
+    fn alloc_test() {
+        let path = utils::disk_prep_path("alloc_test", "img");
+        let mut my_fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD_C).unwrap();
+
+        for i in 0..5 {
+            assert!(!my_fs.is_cached(i + 1));
+            assert_eq!(my_fs.i_alloc(FType::TDir).unwrap(), i + 1);
+            assert!(my_fs.is_cached(i + 1));
+        }
+        assert_eq!(my_fs.i_alloc(FType::TDir).unwrap(), 6);
+        assert!(my_fs.is_cached(6));
+        assert!(!my_fs.is_cached(1));
+        // should be error
+        assert!(my_fs.i_get(1).is_err());
+        // get second cached inode
+        let i2 = my_fs.i_get_mut(2).unwrap();
+        assert_eq!(i2.get_ft() , FType::TDir);
+        // inode 2 should be still in cache and inode 3 should be removed during allocation
+        assert_eq!(my_fs.i_alloc(FType::TDir).unwrap(), 7);
+        assert!(my_fs.is_cached(2));
+        assert!(!my_fs.is_cached(3));
+        // get inode which is not cached
+        assert!(my_fs.i_get(1).is_err());
+        assert!(my_fs.i_get_mut(1).is_ok());
+        assert!(!my_fs.is_cached(4));
+        // inode 1 is cached so i_get should work same as i_get_mut
+        assert_eq!(my_fs.i_get_mut(1).unwrap(), my_fs.i_get(1).unwrap());
+
+        let dev = my_fs.unmountfs();
+        utils::disk_destruct(dev);
+    }
+
+    #[test]
+    fn put_get_test() {
+        let path = utils::disk_prep_path("put_get_test", "img");
+        let mut my_fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD_C).unwrap();
+
+        for i in 0..5 {
+            assert!(!my_fs.is_cached(i + 1));
+            assert_eq!(my_fs.i_alloc(FType::TDir).unwrap(), i + 1);
+            assert!(my_fs.is_cached(i + 1));
+        }
+
+        // test if cached inode after removing is saved to disk
+        let i1 = my_fs.i_get(1).unwrap();
+        assert_eq!(i1.increase_nlink().unwrap(), 1);
+        assert_eq!(i1.get_nlink(), 1);
+        // cache new inode
+        drop(i1);
+        assert!(!my_fs.is_cached(6));
+        assert_eq!(my_fs.i_alloc(FType::TDir).unwrap(), 6);
+        assert!(my_fs.is_cached(6));
+        assert!(!my_fs.is_cached(1));
+        let i1 = my_fs.i_get_mut(1).unwrap();
+        assert_eq!(i1.get_nlink(), 1);
+
+        // test if i_put works
+        assert_eq!(i1.increase_nlink().unwrap(), 2);
+        my_fs.i_put(&i1).unwrap();
+        assert_eq!(my_fs.inode_fs.i_get(1).unwrap().get_nlink(), 2); // testing by original Inode
+        assert_eq!(my_fs.i_get(1).unwrap().get_nlink(), 2);
+    }
+
+    #[test]
+    fn free_test() {
+        let path = utils::disk_prep_path("free_test", "img");
+        let mut my_fs = FSName::mkfs(&path, &SUPERBLOCK_GOOD_C).unwrap();
+
+        for i in 0..3 {
+            assert!(!my_fs.is_cached(i + 1));
+            assert_eq!(my_fs.i_alloc(FType::TDir).unwrap(), i + 1);
+            assert!(my_fs.is_cached(i + 1));
+        }
+
+        // test to free cached inode
+        my_fs.i_free(1).unwrap();
+        assert!(my_fs.i_free(1).is_err()); // error if already free
+        assert!(!my_fs.is_cached(1)); // inode is not more cached
+        assert_eq!(my_fs.i_alloc(FType::TDir).unwrap(), 1); // again allocated
+
+        // test to free still referenced inode
+        let _i1 = my_fs.i_get(1).unwrap();
+        assert!(my_fs.i_free(1).is_err());
+
+        // test to free not not cached inode
+        assert_eq!(my_fs.inode_fs.i_alloc(FType::TDir).unwrap(), 4); // allocate without caching
+        assert!(!my_fs.is_cached(4));
+        my_fs.i_free(4).unwrap();
+        assert_eq!(my_fs.i_get_mut(4).unwrap().get_ft(), FType::TFree)
+    }
+}
 
 // WARNING: DO NOT TOUCH THE BELOW CODE -- IT IS REQUIRED FOR TESTING -- YOU WILL LOSE POINTS IF I MANUALLY HAVE TO FIX YOUR TESTS
 #[cfg(all(test, any(feature = "g", feature = "all")))]
