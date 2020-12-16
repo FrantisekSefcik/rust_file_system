@@ -14,6 +14,8 @@ version = "*"
 anyhow = "1.0.33" #Blanket error handling
 thiserror = "1.0.21" #Concise error definitions, avoiding boilerplate
 bincode = "1.3.1"
+serde = { version = "1.0.117", features = ["derive"] } #Deriving (de)serialization
+lazy_static = "1.4.0" #Lazily evaluated statics
 
 [features]
 # A feature with no dependencies is used mainly for conditional compilation,

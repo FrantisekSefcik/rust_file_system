@@ -41,6 +41,8 @@ dependencies = [
  "anyhow",
  "bincode",
  "cplfs_api",
+ "lazy_static",
+ "serde",
  "thiserror",
 ]
 
