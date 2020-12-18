@@ -13,8 +13,7 @@
 //!
 
 // Turn off the warnings we get from the below example imports, which are currently unused.
-// TODO: this should be removed once you are done implementing this file. You can remove all of the below imports you do not need, as they are simply there to illustrate how you can import things.
-// #![allow(unused_imports)]
+#![allow(unused_imports)]
 
 use std::path::Path;
 
@@ -45,9 +44,6 @@ pub enum BlockLevelError {
     /// Error caused when performing controller operations.
     #[error("Controller error: {0}")]
     ControllerError(#[from] APIError),
-    ///This error has mostly been added for illustrative purposes, and can be useful for quickly drafting some code without thinking about the concrete error
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 /// `BlockFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `Device` to offer block-level abstraction to operate with File System.
@@ -61,9 +57,11 @@ impl FileSysSupport for BlockFileSystem {
     type Error = BlockLevelError;
 
     fn sb_valid(sb: &SuperBlock) -> bool {
+        // Return false if regions do not appear in good order
         if sb.inodestart > sb.bmapstart || sb.bmapstart > sb.datastart {
             return false;
         }
+        // Return false if regions do not to physically fit on the disk together
         if sb.nblocks
             < (2 + ((sb.ninodes * *DINODE_SIZE) as f64 / sb.block_size as f64).ceil() as u64
                 + sb.ndatablocks)
@@ -74,15 +72,19 @@ impl FileSysSupport for BlockFileSystem {
     }
 
     fn mkfs<P: AsRef<Path>>(path: P, sb: &SuperBlock) -> Result<Self, Self::Error> {
+        // Error if super block is not valid
         if !Self::sb_valid(&sb) {
             return Err(BlockLevelError::InvalidSuperBlock);
         } else {
+            // create device
             let mut device = Device::new(path, sb.block_size, sb.nblocks)?;
-            let sb_data = bincode::serialize(sb).unwrap();
+            // write super block to first block on disc
             let mut sb_block = Block::new_zero(0, sb.block_size);
-            sb_block.write_data(&sb_data, 0)?;
+            sb_block.serialize_into(&sb, 0)?;
             device.write_block(&sb_block)?;
+            // write zeros to block of bite map
             device.write_block(&Block::new_zero(sb.bmapstart, sb.block_size))?;
+            // set all datablocks to zeros
             for i in 0..sb.ndatablocks {
                 device.write_block(&Block::new_zero(sb.datastart + i, sb.block_size))?;
             }
@@ -93,8 +95,10 @@ impl FileSysSupport for BlockFileSystem {
     }
 
     fn mountfs(dev: Device) -> Result<Self, Self::Error> {
+        // read super block from device
         let sb_data = dev.read_block(0)?;
         let sb = sb_data.deserialize_from::<SuperBlock>(0).unwrap();
+        // Error if super block is not valid otherwise create file system
         if !Self::sb_valid(&sb) {
             return Err(BlockLevelError::InvalidSuperBlock);
         } else {
@@ -112,63 +116,77 @@ impl FileSysSupport for BlockFileSystem {
 /// Implementation of BlockSupport in BlockFileSystem
 impl BlockSupport for BlockFileSystem {
     fn b_get(&self, i: u64) -> Result<Block, Self::Error> {
-        return Ok(self.device.read_block(i)?);
+        Ok(self.device.read_block(i)?)
     }
 
     fn b_put(&mut self, b: &Block) -> Result<(), Self::Error> {
         self.device.write_block(b)?;
-        return Ok(());
+        Ok(())
     }
 
     fn b_free(&mut self, i: u64) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
-
+        // Error if index is out of bounds
         if i > sb.ndatablocks {
             return Err(BlockLevelError::InvalidBlockIndex(
                 "Block to free out of index",
             ));
         }
-        let mut bmap_block = BitwiseBlock::new(self.b_get(sb.bmapstart).unwrap());
+        // Get bit of block with index `i` with BitwiseBlock helper
+        let mut bmap_block = BitmapBlock::new(self.b_get(sb.bmapstart).unwrap());
+        // Error if bit is 0 (means that block with index i is already free)
         if !bmap_block.get_bit(i) {
             return Err(BlockLevelError::InvalidBlockOperation(
                 "Block is already free.",
             ));
         }
+        // Set bit to 0 to free block
         bmap_block.put_bit(i, false);
         self.b_put(&bmap_block.return_block())?;
-        return Ok(());
+        Ok(())
     }
 
     fn b_zero(&mut self, i: u64) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
+        // Error if index is out of bounds
         if i > sb.ndatablocks {
             return Err(BlockLevelError::InvalidBlockIndex(
                 "Block index out of data block size.",
             ));
         }
+        // put zeros to block with index `i`
         self.b_put(&Block::new_zero(sb.datastart + i, sb.block_size))?;
         return Ok(());
     }
 
     fn b_alloc(&mut self) -> Result<u64, Self::Error> {
         let sb = self.sup_get()?;
-        let mut bmap_block = BitwiseBlock::new(self.b_get(sb.bmapstart).unwrap());
-        let mask: u8 = 255;
+        let mut bmap_block = BitmapBlock::new(self.b_get(sb.bmapstart).unwrap());
+        let mask: u8 = 255; // set mask as byte with all ones bits "11111111"
+                            // get number of bytes to cover all datablocks
         let num_of_bmap_bytes = sb.ndatablocks / 8 + 1;
+        // loop over bytes
         for i in 0..num_of_bmap_bytes {
             let byte = bmap_block.get_byte(i);
+            // do XOR between byte and mask to find out if there is any free index
             if byte ^ mask > 0 {
+                // get how many bites in current byte are bites for datablocks
+                // only last byte can have less then 8 bites
                 let til_bit = if i == num_of_bmap_bytes - 1 {
                     sb.ndatablocks % 8
                 } else {
                     8
                 };
+                // loop over bites in current byte
                 for x in 0..til_bit {
-                    if !bmap_block.get_bit(i * 8 + x) {
-                        bmap_block.put_bit(i * 8 + x, true);
+                    let datablock_index = i * 8 + x;
+                    // allocate block with `datablock_index` if it is free
+                    // set bit to 1 and set to zeros allocated datablock
+                    if !bmap_block.get_bit(datablock_index) {
+                        bmap_block.put_bit(datablock_index, true);
                         self.b_put(&bmap_block.return_block())?;
-                        self.b_zero(i * 8 + x)?;
-                        return Ok(i * 8 + x);
+                        self.b_zero(datablock_index)?;
+                        return Ok(datablock_index);
                     }
                 }
             }
@@ -194,16 +212,16 @@ impl BlockSupport for BlockFileSystem {
     }
 }
 
-/// Wrapper for `Block` to execute bitwise operations.
-pub struct BitwiseBlock {
+/// Wrapper for `Block` to execute bitwise operations on bitmap block
+pub struct BitmapBlock {
     /// block as boxed Block
     pub block: Box<Block>,
 }
 
-impl BitwiseBlock {
+impl BitmapBlock {
     /// Create new BitwiseBlock, having given `Block`.
-    pub fn new(block: Block) -> BitwiseBlock {
-        return BitwiseBlock {
+    pub fn new(block: Block) -> BitmapBlock {
+        return BitmapBlock {
             block: Box::from(block),
         };
     }
@@ -286,7 +304,7 @@ mod test_with_utils {
     use cplfs_api::fs::{BlockSupport, FileSysSupport};
     use cplfs_api::types::{Block, SuperBlock};
 
-    use crate::a_block_support::{BitwiseBlock, FSName};
+    use crate::a_block_support::{BitmapBlock, FSName};
 
     #[path = "utils.rs"]
     mod utils;
@@ -409,7 +427,7 @@ mod test_with_utils {
         assert_eq!(fs.b_alloc().unwrap(), 1);
         fs.b_free(0).unwrap();
         assert_eq!(fs.b_alloc().unwrap(), 0);
-        let block = BitwiseBlock::new(fs.b_get(SUPERBLOCK_GOOD.bmapstart).unwrap());
+        let block = BitmapBlock::new(fs.b_get(SUPERBLOCK_GOOD.bmapstart).unwrap());
         assert_eq!(format!("{:#010b}", block.get_byte(0)), "0b00000011");
 
         let dev = fs.unmountfs();
@@ -424,7 +442,7 @@ mod test_with_utils {
             fs.b_alloc().unwrap();
         }
         assert!(fs.b_alloc().is_err());
-        let block = BitwiseBlock::new(fs.b_get(SUPERBLOCK_GOOD.bmapstart).unwrap());
+        let block = BitmapBlock::new(fs.b_get(SUPERBLOCK_GOOD.bmapstart).unwrap());
         assert_eq!(format!("{:#010b}", block.get_byte(0)), "0b00011111");
 
         let dev = fs.unmountfs();
@@ -460,7 +478,7 @@ mod test_with_utils {
     #[test]
     fn bitwise_block_test() {
         let block = Block::new_zero(0, 100);
-        let mut bitwise_block = BitwiseBlock::new(block);
+        let mut bitwise_block = BitmapBlock::new(block);
 
         assert_eq!(bitwise_block.get_bit(0), false);
         // set first and last bit in first byte
