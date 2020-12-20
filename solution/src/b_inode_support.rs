@@ -5,17 +5,15 @@
 //! [`FileSysSupport`]: ../../cplfs_api/fs/trait.FileSysSupport.html
 //! [`BlockSupport`]: ../../cplfs_api/fs/trait.BlockSupport.html
 //! [`InodeSupport`]: ../../cplfs_api/fs/trait.InodeSupport.html
-//! Make sure this file does not contain any unaddressed `TODO`s anymore when you hand it in.
 //!
 //! # Status
 //!
-//! **TODO**: Replace the question mark below with YES, NO, or PARTIAL to
 //! indicate the status of this assignment. If you want to tell something
 //! about this assignment to the grader, e.g., you have a bug you can't fix,
 //! or you want to explain your approach, write it down after the comments
 //! section. If you had no major issues and everything works, there is no need to write any comments.
 //!
-//! COMPLETED: ?
+//! COMPLETED: YES
 //!
 //! COMMENTS:
 //!
@@ -35,11 +33,11 @@ use cplfs_api::types::{
 };
 use std::path::Path;
 
-/// This error can occurs during manipulating with Block File System
+/// This error can occurs during manipulating with Inode File System
 #[derive(Error, Debug)]
 pub enum InodeLevelError {
     /// Error caused when `SuperBlock` to initialize `BlockFileSystem` is not valid.
-    #[error("Invalid SuperBlock in BlockFileSystem initialization")]
+    #[error("Invalid SuperBlock in InodeFileSystem initialization")]
     InvalidSuperBlock,
     /// Error caused when Inode operation is not valid.
     #[error("Invalid inode operation: {0}")]
@@ -47,17 +45,15 @@ pub enum InodeLevelError {
     /// Error caused when performing controller operations.
     #[error("Controller error: {0}")]
     ControllerError(#[from] APIError),
-    /// Error caused when performing controller operations.
+    /// Error caused when performing block operations.
     #[error("Block error: {0}")]
     BlockError(#[from] BlockLevelError),
-    ///This error has mostly been added for illustrative purposes, and can be useful for quickly drafting some code without thinking about the concrete error
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
-/// `InodeFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `Device` to offer block-level abstraction to operate with File System.
+/// `InodeFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `BlockFileSystem` to access block-level functionality.
+/// `InodeFileSystem` does changes to `mkfs` method from `BlockFileSystem` implementation.
 pub struct InodeFileSystem {
-    /// Wrapped device as a boxed Device.
+    /// Wrapped BlockFileSystem.
     pub block_fs: BlockFileSystem,
 }
 
@@ -69,23 +65,26 @@ impl FileSysSupport for InodeFileSystem {
         return BlockFileSystem::sb_valid(sb);
     }
 
+    /// To implementation of this method from BlockSupport was added only initialization of inodes in corresponding blocks on device
     fn mkfs<P: AsRef<Path>>(path: P, sb: &SuperBlock) -> Result<Self, Self::Error> {
+        // Error if super block is not valid
         if !Self::sb_valid(&sb) {
-            return Err(InodeLevelError::InvalidSuperBlock);
+            return Err(Self::Error::InvalidSuperBlock);
         } else {
-            // write super block to first block
+            // create device
             let mut device = Device::new(path, sb.block_size, sb.nblocks)?;
-            let sb_data = bincode::serialize(sb).unwrap();
+            // write super block to first block on disc
             let mut sb_block = Block::new_zero(0, sb.block_size);
-            sb_block.write_data(&sb_data, 0)?;
+            sb_block.serialize_into(&sb, 0)?;
             device.write_block(&sb_block)?;
-
             // initialize inodes
             let num_inodes_in_block = sb.block_size / *DINODE_SIZE;
             // + 1 inode because first is not in use
             let num_blocks = (sb.ninodes + 1) / num_inodes_in_block + 1;
+            // loop over all blocks to be used for storing inodes
             for b in 0..num_blocks {
                 let mut i_block = Block::new_zero(sb.inodestart + b, sb.block_size);
+                // loop over all inodes in current block and save free inodes
                 for i in 0..num_inodes_in_block {
                     let mut dinode = DInode::default();
                     dinode.ft = FType::TFree;
@@ -93,15 +92,12 @@ impl FileSysSupport for InodeFileSystem {
                 }
                 device.write_block(&i_block)?;
             }
-
-            // initialize bitmap
+            // write zeros to block of bitmap
             device.write_block(&Block::new_zero(sb.bmapstart, sb.block_size))?;
-
-            // set zeros to each data block
+            // set all datablocks to zeros
             for i in 0..sb.ndatablocks {
                 device.write_block(&Block::new_zero(sb.datastart + i, sb.block_size))?;
             }
-
             return Ok(Self {
                 block_fs: BlockFileSystem {
                     device: Box::from(device),
@@ -121,7 +117,8 @@ impl FileSysSupport for InodeFileSystem {
     }
 }
 
-/// Implementation of BlockSupport in BlockFileSystem
+/// Implementation of BlockSupport in InodeFileSystem
+/// Nothing was changed compare to BlockFileSystem
 impl BlockSupport for InodeFileSystem {
     fn b_get(&self, i: u64) -> Result<Block, Self::Error> {
         return Ok(self.block_fs.b_get(i)?);
@@ -152,26 +149,33 @@ impl BlockSupport for InodeFileSystem {
     }
 }
 
+/// Implementation of InodeSupport in InodeFileSystem
 impl InodeSupport for InodeFileSystem {
+    // Same type of inode
     type Inode = Inode;
 
     fn i_get(&self, i: u64) -> Result<Self::Inode, Self::Error> {
         let sb = self.sup_get()?;
+        // Error if given inode index is out of bounds
         if i >= sb.ninodes {
             return Err(InodeLevelError::InvalidInodeOperation(
                 "Given Inode index is higher then number of all inodes.",
             ));
         }
+        // get block in which is inode placed
         let num_inodes_in_block = sb.block_size / *DINODE_SIZE;
         let block = self.b_get(sb.inodestart + (i / num_inodes_in_block))?;
+        // read DInode from block and from offset and return DInode wrapped in Inode
         let dinode = block.deserialize_from::<DInode>((i % num_inodes_in_block) * *DINODE_SIZE)?;
         return Ok(Inode::new(i, dinode));
     }
 
     fn i_put(&mut self, ino: &Self::Inode) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
+        // get block in which inode should be placed
         let num_inodes_in_block = sb.block_size / *DINODE_SIZE;
         let mut block = self.b_get(sb.inodestart + ino.inum / num_inodes_in_block)?;
+        // write DInode to corresponding offset in block
         block.serialize_into(
             &ino.disk_node,
             (ino.inum % num_inodes_in_block) * *DINODE_SIZE,
@@ -182,22 +186,23 @@ impl InodeSupport for InodeFileSystem {
 
     fn i_free(&mut self, i: u64) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
-        let inode = self.i_get(i)?; // get inode with index i
+        let inode = self.i_get(i)?;
+        // Error if inode is already free
         if inode.get_ft() == FType::TFree {
-            // if inode is already free
             return Err(InodeLevelError::InvalidInodeOperation(
                 "Inode is already free.",
             ));
         }
+        // do nothing if inode is still referenced
         if inode.get_nlink() > 0 {
-            // if inode is still referenced
             return Ok(());
         }
+        // if inode can be freed then
         // iterate all blocks and free them
         for b in 0..(inode.get_size() as f64 / sb.block_size as f64).ceil() as u64 {
             self.b_free(inode.get_block(b) - sb.datastart)?;
         }
-        // put free inode
+        // replace inode by free inode
         self.i_put(&Inode::new(i, DInode::default()))?;
         return Ok(());
     }
@@ -205,16 +210,20 @@ impl InodeSupport for InodeFileSystem {
     fn i_alloc(&mut self, ft: FType) -> Result<u64, Self::Error> {
         let sb = self.sup_get()?;
         let num_inodes_in_block = sb.block_size / *DINODE_SIZE;
-        let mut b: u64 = sb.inodestart;
-        let mut block = self.b_get(b)?;
+        // set start block index
+        let mut block_index: u64 = sb.inodestart;
+        let mut block = self.b_get(block_index)?;
+        // iterate over all inodes
         for i in 1..sb.ninodes {
-            // get next block
+            // get next block if no more inodes in current block
             if i % num_inodes_in_block == 0 {
-                b = b + 1;
-                block = self.b_get(b)?;
+                block_index = block_index + 1;
+                block = self.b_get(block_index)?;
             }
+            // read inode on offset form block
             let offset = (i % num_inodes_in_block) * *DINODE_SIZE;
             let inode = block.deserialize_from::<DInode>(offset).unwrap();
+            // if inode is free then initialize new one and return its index
             if inode.ft == FType::TFree {
                 block.serialize_into(
                     &DInode {
@@ -229,6 +238,7 @@ impl InodeSupport for InodeFileSystem {
                 return Ok(i);
             }
         }
+        // Error if no free inode is available
         return Err(InodeLevelError::InvalidInodeOperation(
             "No free inode to allocate",
         ));
@@ -236,12 +246,12 @@ impl InodeSupport for InodeFileSystem {
 
     fn i_trunc(&mut self, inode: &mut Self::Inode) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
-        // iterate all blocks and free them
+        // iterate all allocated blocks of inode and free them
         for i in 0..(inode.get_size() as f64 / sb.block_size as f64).ceil() as u64 {
             self.b_free(inode.disk_node.direct_blocks[i as usize] - sb.datastart)?;
             inode.disk_node.direct_blocks[i as usize] = 0;
         }
-        // put inode
+        // reset all counters and save inode
         inode.disk_node.nlink = 0;
         inode.disk_node.size = 0;
         self.i_put(inode)?;
@@ -269,7 +279,7 @@ mod test_with_utils {
     static BLOCK_SIZE: u64 = 1000;
     static NBLOCKS: u64 = 10;
     static SUPERBLOCK_GOOD: SuperBlock = SuperBlock {
-        block_size: BLOCK_SIZE, //Note; assumes at least 2 inodes fit in one block. This should be the case for any reasonable inode implementation you might come up with
+        block_size: BLOCK_SIZE,
         nblocks: NBLOCKS,
         ninodes: 6,
         inodestart: 1,

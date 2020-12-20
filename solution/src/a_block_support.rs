@@ -82,7 +82,7 @@ impl FileSysSupport for BlockFileSystem {
             let mut sb_block = Block::new_zero(0, sb.block_size);
             sb_block.serialize_into(&sb, 0)?;
             device.write_block(&sb_block)?;
-            // write zeros to block of bite map
+            // write zeros to block of bitmap
             device.write_block(&Block::new_zero(sb.bmapstart, sb.block_size))?;
             // set all datablocks to zeros
             for i in 0..sb.ndatablocks {
