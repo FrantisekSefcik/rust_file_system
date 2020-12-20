@@ -7,7 +7,6 @@
 //! [`BlockSupport`]: ../../cplfs_api/fs/trait.BlockSupport.html
 //! [`InodeSupport`]: ../../cplfs_api/fs/trait.InodeSupport.html
 //! [`InodeRWSupport`]: ../../cplfs_api/fs/trait.InodeRWSupport.html
-//! Make sure this file does not contain any unaddressed `TODO`s anymore when you hand it in.
 //!
 //! # Status
 //!
@@ -25,38 +24,35 @@
 
 use thiserror::Error;
 
-use crate::b_inode_support::{InodeLevelError, InodeFileSystem};
-use cplfs_api::error_given::APIError;
-use cplfs_api::fs::{FileSysSupport, InodeSupport, BlockSupport, InodeRWSupport};
-use cplfs_api::types::{SuperBlock, Inode, FType, Block, Buffer, InodeLike};
-use std::path::Path;
+use crate::b_inode_support::{InodeFileSystem, InodeLevelError};
 use cplfs_api::controller::Device;
+use cplfs_api::error_given::APIError;
+use cplfs_api::fs::{BlockSupport, FileSysSupport, InodeRWSupport, InodeSupport};
+use cplfs_api::types::{Block, Buffer, FType, Inode, InodeLike, SuperBlock};
+use std::path::Path;
 
-/// This error can occurs during manipulating with Directory File System
+/// This error can occurs during manipulating with Inode Read Write File System
 #[derive(Error, Debug)]
 pub enum InodeRWError {
-    /// Error caused when performing controller operations.
-    #[error("Inode error: {0}")]
-    InodeError(#[from] InodeLevelError),
-    /// Error caused when Directory operation is not valid.
+    /// Error caused when Inode read write operation is not valid.
     #[error("{0}")]
     InodeReadWriteError(&'static str),
+    /// Error caused when performing inode operations.
+    #[error("Inode error: {0}")]
+    InodeError(#[from] InodeLevelError),
     /// Error caused when performing controller operations.
     #[error("Controller error: {0}")]
     ControllerError(#[from] APIError),
-    ///This error has mostly been added for illustrative purposes, and can be useful for quickly drafting some code without thinking about the concrete error
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
-/// `DirectoryFileSystem` wraps InodeFileSystem and add Directory support
+/// `InodeRWFileSystem` wraps InodeFileSystem and add InodeRWSupport
 pub struct InodeRWFileSystem {
     /// wrapped Inodes support layer
     inode_fs: InodeFileSystem,
 }
 
-/// `InodeFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `Device` to offer block-level abstraction to operate with File System.
-/// Implementation of FileSysSupport in BlockFileSystem
+/// Implementation of FileSysSupport in InodeRWFileSystem
+/// nothing changed to lower layer implementation
 impl FileSysSupport for InodeRWFileSystem {
     type Error = InodeRWError;
 
@@ -71,7 +67,7 @@ impl FileSysSupport for InodeRWFileSystem {
     }
 
     fn mountfs(dev: Device) -> Result<Self, Self::Error> {
-        Ok( Self {
+        Ok(Self {
             inode_fs: InodeFileSystem::mountfs(dev)?,
         })
     }
@@ -81,7 +77,8 @@ impl FileSysSupport for InodeRWFileSystem {
     }
 }
 
-/// Implementation of BlockSupport in BlockFileSystem
+/// Implementation of BlockSupport in InodeRWFileSystem
+/// nothing changed to lower layer implementation
 impl BlockSupport for InodeRWFileSystem {
     fn b_get(&self, i: u64) -> Result<Block, Self::Error> {
         return Ok(self.inode_fs.b_get(i)?);
@@ -112,6 +109,8 @@ impl BlockSupport for InodeRWFileSystem {
     }
 }
 
+/// Implementation of InodeSupport in InodeRWFileSystem
+/// nothing changed to lower layer implementation
 impl InodeSupport for InodeRWFileSystem {
     type Inode = Inode;
 
@@ -136,32 +135,39 @@ impl InodeSupport for InodeRWFileSystem {
     }
 }
 
+/// Implementation of InodeRWSupport in InodeRWFileSystem
 impl InodeRWSupport for InodeRWFileSystem {
-
-    fn i_read(&self, inode: &Self::Inode, buf: &mut Buffer, off: u64, n: u64) -> Result<u64, Self::Error> {
+    fn i_read(
+        &self,
+        inode: &Self::Inode,
+        buf: &mut Buffer,
+        off: u64,
+        n: u64,
+    ) -> Result<u64, Self::Error> {
         let sb = self.sup_get()?;
-        // Return 0 if offset is on bound
+        // Return 0 if offset is same as inode size
         if off == inode.get_size() {
             return Ok(0);
         }
         // Error if offset is out of bounds
         if off > inode.get_size() {
             return Err(Self::Error::InodeReadWriteError(
-                "Number of bytes to be read exceeds given Buffer length."));
+                "Number of bytes to be read exceeds given Buffer length.",
+            ));
         }
-        // Cut number of bytes to be written if buffer size is less then n
+        // Cut number of bytes to be written if buffer size is less then n length
         let n = if buf.len() < n { buf.len() } else { n };
         // Get range of blocks where data to be read are allocated
         let start_block = off / sb.block_size;
-        let end_block = (off + n)  / sb.block_size;
+        let end_block = (off + n) / sb.block_size;
         // Define first block offset where to start read
         let mut start_block_offset = off % sb.block_size;
-        // Define first buff offset where to start write
+        // Define first buffer offset where to start write
         let mut buff_offset = 0;
-        // Loop over block
+        // Loop over blocks where are data to be read
         for b_i in start_block..(end_block + 1) {
-            // Get end byte position in block while data will be read
-            // From current block we read data from interval (start_block_offset, end_block_offset)
+            // Get last byte position in the block while data will be read
+            // In current block we read data from interval (start_block_offset, end_block_offset)
             let end_block_offset = if start_block_offset + (n - buff_offset) >= sb.block_size {
                 sb.block_size
             } else {
@@ -169,7 +175,7 @@ impl InodeRWSupport for InodeRWFileSystem {
             };
             // get current block
             let block = self.b_get(inode.get_block(b_i))?;
-            // Read and Write data to buffer
+            // Read from block and Write data to buffer
             let mut tmp_data = vec![0; (end_block_offset - start_block_offset) as usize];
             block.read_data(&mut tmp_data, start_block_offset)?;
             buf.write_data(&tmp_data, buff_offset)?;
@@ -180,29 +186,35 @@ impl InodeRWSupport for InodeRWFileSystem {
         return Ok(n);
     }
 
-    fn i_write(&mut self, inode: &mut Self::Inode, buf: &Buffer, off: u64, n: u64) -> Result<(), Self::Error> {
+    fn i_write(
+        &mut self,
+        inode: &mut Self::Inode,
+        buf: &Buffer,
+        off: u64,
+        n: u64,
+    ) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
         // Error if number of bytes to be written is higher then buffer length
         if buf.len() < n {
             return Err(Self::Error::InodeReadWriteError(
-                "Number of bytes to be written exceeds given Buffer length."));
+                "Number of bytes to be written exceeds given Buffer length.",
+            ));
         }
         // Error if start offset is out of bounds
         if off > inode.get_size() {
-            return Err(Self::Error::InodeReadWriteError(
-                "Offset is out of bounds."));
+            return Err(Self::Error::InodeReadWriteError("Offset is out of bounds."));
         }
         // Count number of currently allocated blocks
         let num_allocated_blocks = (inode.get_size() as f64 / sb.block_size as f64).ceil() as u64;
         // Get range of blocks where data should be written
         let start_block = off / sb.block_size;
-        let end_block = (off + n)  / sb.block_size;
+        let end_block = (off + n) / sb.block_size;
         // Get first block offset where to start write
         let mut start_block_offset = off % sb.block_size;
         // Define start offset for buffer
         let mut buff_offset = 0;
         for b_i in start_block..(end_block + 1) {
-            // Get end byte position in block while data will be written
+            // Get last byte position in the block while data will be written
             // In current block we write data to interval (start_block_offset, end_block_offset)
             let end_block_offset = if start_block_offset + (n - buff_offset) >= sb.block_size {
                 sb.block_size
@@ -214,12 +226,12 @@ impl InodeRWSupport for InodeRWFileSystem {
                 inode.disk_node.direct_blocks[b_i as usize] = self.b_alloc()? + sb.datastart;
             }
             let mut block = self.b_get(inode.get_block(b_i))?;
-            // Read data from buffer and  write to current block
+            // Read data from buffer and write to current block
             let mut tmp_data = vec![0; (end_block_offset - start_block_offset) as usize];
             buf.read_data(&mut tmp_data, buff_offset)?;
             block.write_data(&tmp_data, start_block_offset)?;
             self.b_put(&block)?;
-            // Update buffer start offset and block start offset
+            // Update buffer-start-offset and block-start-offset
             buff_offset += end_block_offset - start_block_offset;
             start_block_offset = 0;
         }
@@ -232,7 +244,6 @@ impl InodeRWSupport for InodeRWFileSystem {
     }
 }
 
-
 /// You are free to choose the name for your file system. As we will use
 /// automated tests when grading your assignment, indicate here the name of
 /// your file system data type so we can just use `FSName` instead of
@@ -242,8 +253,8 @@ pub type FSName = InodeRWFileSystem;
 #[cfg(test)]
 #[path = "../../api/fs-tests"]
 mod test_with_utils {
-    use cplfs_api::fs::{BlockSupport, FileSysSupport, InodeSupport, InodeRWSupport};
-    use cplfs_api::types::{DInode, FType, Inode, InodeLike, SuperBlock, Buffer};
+    use cplfs_api::fs::{BlockSupport, FileSysSupport, InodeRWSupport, InodeSupport};
+    use cplfs_api::types::{Buffer, DInode, FType, Inode, InodeLike, SuperBlock};
 
     use crate::e_inode_RW_support::FSName;
 
@@ -284,7 +295,7 @@ mod test_with_utils {
                 nlink: 0,
                 size: 3 * BLOCK_SIZE,
                 direct_blocks: [5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            }
+            },
         );
         my_fs.i_put(&i2).unwrap(); //Store the inode to disk as well
 
@@ -334,7 +345,7 @@ mod test_with_utils {
                 nlink: 0,
                 size: (2.5 * (BLOCK_SIZE as f32)) as u64,
                 direct_blocks: [5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            }
+            },
         );
         my_fs.i_put(&i2).unwrap(); //Store the inode to disk as well
 
