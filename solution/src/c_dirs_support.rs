@@ -6,7 +6,6 @@
 //! [`BlockSupport`]: ../../cplfs_api/fs/trait.BlockSupport.html
 //! [`InodeSupport`]: ../../cplfs_api/fs/trait.InodeSupport.html
 //! [`DirectorySupport`]: ../../cplfs_api/fs/trait.DirectorySupport.html
-//! Make sure this file does not contain any unaddressed `TODO`s anymore when you hand it in.
 //!
 //! # Status
 //!
@@ -37,7 +36,7 @@ use std::path::Path;
 /// This error can occurs during manipulating with Directory File System
 #[derive(Error, Debug)]
 pub enum DirectoryLevelError {
-    /// Error caused when performing controller operations.
+    /// Error caused when performing inode operations.
     #[error("Inode error: {0}")]
     InodeError(#[from] InodeLevelError),
     /// Error caused when Directory operation is not valid.
@@ -46,9 +45,6 @@ pub enum DirectoryLevelError {
     /// Error caused when performing controller operations.
     #[error("Controller error: {0}")]
     ControllerError(#[from] APIError),
-    ///This error has mostly been added for illustrative purposes, and can be useful for quickly drafting some code without thinking about the concrete error
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 /// `DirectoryFileSystem` wraps InodeFileSystem and add Directory support
@@ -57,8 +53,8 @@ pub struct DirectoryFileSystem {
     inode_fs: InodeFileSystem,
 }
 
-/// `InodeFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `Device` to offer block-level abstraction to operate with File System.
 /// Implementation of FileSysSupport in BlockFileSystem
+/// Only `mkfs` and `mountfs` methods differ from lower layer implementation by adding first root inode
 impl FileSysSupport for DirectoryFileSystem {
     type Error = DirectoryLevelError;
 
@@ -67,9 +63,11 @@ impl FileSysSupport for DirectoryFileSystem {
     }
 
     fn mkfs<P: AsRef<Path>>(path: P, sb: &SuperBlock) -> Result<Self, Self::Error> {
+        // initialize InodeFileSystem which will be wrapped
         let mut fs = Self {
             inode_fs: InodeFileSystem::mkfs(path, sb)?,
         };
+        // added root inode witn inum and nlink attributes set to 1
         fs.i_put(&Inode::new(
             1,
             DInode {
@@ -83,9 +81,11 @@ impl FileSysSupport for DirectoryFileSystem {
     }
 
     fn mountfs(dev: Device) -> Result<Self, Self::Error> {
+        // mount InodeFileSystem with device
         let mut fs = Self {
             inode_fs: InodeFileSystem::mountfs(dev)?,
         };
+        // added root inode witn inum and nlink attributes set to 1
         fs.i_put(&Inode::new(
             1,
             DInode {
@@ -103,7 +103,8 @@ impl FileSysSupport for DirectoryFileSystem {
     }
 }
 
-/// Implementation of BlockSupport in BlockFileSystem
+/// Implementation of BlockSupport in DirectoryFileSystem
+/// Nothing is changed compare to InodeFileSystem
 impl BlockSupport for DirectoryFileSystem {
     fn b_get(&self, i: u64) -> Result<Block, Self::Error> {
         return Ok(self.inode_fs.b_get(i)?);
@@ -134,6 +135,8 @@ impl BlockSupport for DirectoryFileSystem {
     }
 }
 
+/// Implementation of InodeSupport in DirectoryFileSystem
+/// Nothing is changed compare to InodeFileSystem
 impl InodeSupport for DirectoryFileSystem {
     type Inode = Inode;
 
@@ -158,6 +161,7 @@ impl InodeSupport for DirectoryFileSystem {
     }
 }
 
+/// Implementation of DirectorySupport in DirectoryFileSystem
 impl DirectorySupport for DirectoryFileSystem {
     fn new_de(inum: u64, name: &str) -> Option<DirEntry> {
         let mut de = DirEntry::default();
@@ -181,7 +185,7 @@ impl DirectorySupport for DirectoryFileSystem {
         if name.len() > DIRNAME_SIZE || name.len() == 0 {
             return None;
         }
-        // if name is . or .. then it is OK, then save and return
+        // if name is "." or ".." then save to DirEntry and return
         if name == "." || name == ".." {
             for (i, ch) in name.chars().enumerate() {
                 de.name[i] = ch;
@@ -189,15 +193,15 @@ impl DirectorySupport for DirectoryFileSystem {
             de.name[name.len()] = '\0';
             return Some(());
         }
-        // iterate over all chars and save to array
+        // iterate over all chars, check if it is alphanumeric and save to an array
         for (i, ch) in name.chars().enumerate() {
             if !ch.is_alphanumeric() {
                 return None;
             }
             de.name[i] = ch;
         }
+        // if name is shorter then 14 put \0 on the end
         if name.len() < DIRNAME_SIZE {
-            // if name is shorter then 14 put \0 on the end
             de.name[name.len() as usize] = '\0';
         }
         return Some(());
@@ -209,14 +213,14 @@ impl DirectorySupport for DirectoryFileSystem {
         name: &str,
     ) -> Result<(Self::Inode, u64), Self::Error> {
         let sb = self.sup_get()?;
+        // Error if inode is not Directory
         if inode.get_ft() != FType::TDir {
-            // error if inode is not Directory
             return Err(DirectoryLevelError::InvalidDirectoryOperation(
                 "To look up DirEntry inode must be Directory type.",
             ));
         }
+        // Error if directory has no entries
         if inode.get_size() == 0 {
-            // error if dir has no entries
             return Err(DirectoryLevelError::InvalidDirectoryOperation(
                 "Directory has no entries.",
             ));
@@ -225,9 +229,9 @@ impl DirectorySupport for DirectoryFileSystem {
         // number of allocated data blocks
         let num_blocks = (inode.get_size() as f64 / sb.block_size as f64).ceil() as u64;
 
-        // loop allocated blocks
+        // loop all allocated blocks of Directory inode
         for b_i in 0..num_blocks {
-            // wrap block to DirEntryBlock and look for DirEntry with name
+            // wrap current block to DirEntryBlock and lookup for DirEntry with name
             let de_block = DirEntryBlock::new(self.b_get(inode.get_block(b_i))?);
             match de_block.lookup_name(name) {
                 Ok((de, offset)) => {
@@ -248,22 +252,20 @@ impl DirectorySupport for DirectoryFileSystem {
         name: &str,
         inum: u64,
     ) -> Result<u64, Self::Error> {
+        // Error if inode is not directory type
         if inode.get_ft() != FType::TDir {
-            // error if inode is not directory type
             return Err(DirectoryLevelError::InvalidDirectoryOperation(
                 "Inode must be Directory type to save DirEntry.",
             ));
         };
-
+        // Error if inode to be linked is Free
         if self.i_get(inum).unwrap().get_ft() == FType::TFree {
-            // error if one inode to be linked is Free
             return Err(DirectoryLevelError::InvalidDirectoryOperation(
                 "Inode to by linked is not in use.",
             ));
         };
-
+        // Error if DirEntry with name already exist
         match self.dirlookup(inode, name) {
-            // error if DirEntry with name already exist
             Ok(_) => {
                 return Err(DirectoryLevelError::InvalidDirectoryOperation(
                     "DirEntry with same name is already in directory",
@@ -272,38 +274,40 @@ impl DirectorySupport for DirectoryFileSystem {
             _ => {}
         };
         let sb = self.sup_get()?;
-        // number of allocated data blocks
+        // number of al; allocated blocks
         let num_blocks = (inode.get_size() as f64 / sb.block_size as f64).ceil() as u64;
         // if any allocated blocks then find free space for DirEntry
         if num_blocks > 0 {
-            // loop allocated blocks
+            // loop all allocated blocks
             for b_i in 0..num_blocks {
                 let mut de_block = DirEntryBlock::new(self.b_get(inode.get_block(b_i))?);
+                // look in block if there is free space to allocate one DirEntry
                 match de_block.find_free() {
-                    Ok(o) => {
+                    Ok(offset) => {
                         // free space for DirEntry was found in current block
                         // create DirEntry and save to block
                         match Self::new_de(inum, name) {
-                            Some(de) => de_block.de_put(&de, o),
+                            Some(de) => de_block.de_put(&de, offset),
                             None => {
                                 return Err(DirectoryLevelError::InvalidDirectoryOperation(
                                     "Unable to create DirEntry with given name and inum.",
                                 ))
                             }
                         }?;
+                        // save block back to disk
+                        self.b_put(&de_block.return_block()).unwrap();
                         // find corresponding linked inode and update nlink
                         if inum != inode.get_inum() {
                             let mut inode_df = self.i_get(inum)?;
                             inode_df.disk_node.nlink += 1;
                             self.i_put(&inode_df).unwrap();
                         }
-                        self.b_put(&de_block.return_block()).unwrap();
-                        // update size of inode
-                        if b_i * sb.block_size + o >= inode.get_size() {
+                        // update size of inode, save and return
+                        if b_i * sb.block_size + offset >= inode.get_size() {
                             inode.disk_node.size = inode.get_size() + *DIRENTRY_SIZE;
                         }
                         self.i_put(inode)?;
-                        return Ok(b_i * sb.block_size + o);
+                        return Ok(b_i * sb.block_size + offset);
                     }
                     _ => {}
                 }
@@ -311,10 +315,11 @@ impl DirectorySupport for DirectoryFileSystem {
         }
 
         // when no free space was found in allocated blocks, we have to add new one
+        // or first entry should be saved
         inode.disk_node.direct_blocks[num_blocks as usize] = sb.datastart + self.b_alloc()?;
         let mut de_block = DirEntryBlock::new(self.b_get(inode.get_block(num_blocks))?);
+        // create DirEntry and save to block
         match Self::new_de(inum, name) {
-            // create DirEntry and save to block
             Some(de) => de_block.de_put(&de, 0),
             None => {
                 return Err(DirectoryLevelError::InvalidDirectoryOperation(
@@ -322,14 +327,15 @@ impl DirectorySupport for DirectoryFileSystem {
                 ))
             }
         }?;
+        // save block back to disk
+        self.b_put(&de_block.return_block()).unwrap();
         // find corresponding linked inode and update nlink
         if inum != inode.get_inum() {
             let mut inode_df = self.i_get(inum)?;
             inode_df.disk_node.nlink += 1;
             self.i_put(&inode_df)?;
         }
-        self.b_put(&de_block.return_block()).unwrap();
-        // update size of inode
+        // update size of inode, save and return offset
         inode.disk_node.size += num_blocks * sb.block_size + *DIRENTRY_SIZE;
         self.i_put(inode)?;
         return Ok(num_blocks * sb.block_size);
@@ -337,6 +343,10 @@ impl DirectorySupport for DirectoryFileSystem {
 }
 
 /// Wrapper for `Block` to execute `DirEntry` operations.
+/// - used to find place to allocate new entry in the block
+/// - used to find entry with name in the block
+/// - used to save and free entry with offset
+/// - used to count all not free entries in the block
 pub struct DirEntryBlock {
     /// block as boxed Block
     pub block: Box<Block>,
