@@ -7,7 +7,6 @@
 //! [`InodeSupport`]: ../../cplfs_api/fs/trait.InodeSupport.html
 //! [`DirectorySupport`]: ../../cplfs_api/fs/trait.DirectorySupport.html
 //! [`PathSupport`]: ../../cplfs_api/fs/trait.PathSupport.html
-//! Make sure this file does not contain any unaddressed `TODO`s anymore when you hand it in.
 //!
 //! # Status
 //!
@@ -54,9 +53,6 @@ pub enum PathsError {
     /// Error caused when performing controller operations.
     #[error("Controller error: {0}")]
     ControllerError(#[from] APIError),
-    ///This error has mostly been added for illustrative purposes, and can be useful for quickly drafting some code without thinking about the concrete error
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
 }
 
 /// `DirectoryFileSystem` wraps InodeFileSystem and add Directory support
@@ -68,6 +64,7 @@ pub struct PathsFileSystem {
 }
 
 /// Implementation of FileSysSupport in PathsFileSystem
+/// changes are only in `mkfs` and `mountfs` to initialize `cws` to "/" and add two entries in ".", ".." in root inode
 impl FileSysSupport for PathsFileSystem {
     type Error = PathsError;
 
@@ -105,6 +102,7 @@ impl FileSysSupport for PathsFileSystem {
 }
 
 /// Implementation of BlockSupport in PathsFileSystem
+/// unchanged from previous layer implementation
 impl BlockSupport for PathsFileSystem {
     fn b_get(&self, i: u64) -> Result<Block, Self::Error> {
         return Ok(self.dir_fs.b_get(i)?);
@@ -136,6 +134,7 @@ impl BlockSupport for PathsFileSystem {
 }
 
 /// Implementation of InodeSupport in PathsFileSystem
+/// unchanged from previous layer implementation
 impl InodeSupport for PathsFileSystem {
     type Inode = Inode;
 
@@ -161,6 +160,7 @@ impl InodeSupport for PathsFileSystem {
 }
 
 /// Implementation of DirectorySupport in PathsFileSystem
+/// unchanged from previous layer implementation
 impl DirectorySupport for PathsFileSystem {
     fn new_de(inum: u64, name: &str) -> Option<DirEntry> {
         return DirectoryFileSystem::new_de(inum, name);
@@ -192,13 +192,14 @@ impl DirectorySupport for PathsFileSystem {
     }
 }
 
+/// Implementation of PathSupport in PathsFileSystem
 impl PathSupport for PathsFileSystem {
     fn valid_path(path: &str) -> bool {
         // Error if path is empty
         if path.len() == 0 {
             return false;
         }
-        // Error if path ends with / and it is not only root path
+        // Error if path ends with / and it is not root path
         if path.len() > 1 && path.chars().last().unwrap() == '/' {
             return false;
         }
@@ -206,15 +207,16 @@ impl PathSupport for PathsFileSystem {
         if path.chars().nth(0).unwrap() != '/' && path.chars().nth(0).unwrap() != '.' {
             return false;
         }
-        // Get all names on path and loop over them
+        // Get all names on the path and loop over them
         let names = path.split('/').filter(|x| x.len() > 0);
         let mut de = DirEntry::default();
         for name in names {
-            // check if all names are valid
+            // check if name is valid
             if Self::set_name_str(&mut de, name) == None {
                 return false;
             }
         }
+        // return true if every previous checks fine
         return true;
     }
 
@@ -235,12 +237,12 @@ impl PathSupport for PathsFileSystem {
     fn resolve_path(&self, path: &str) -> Result<Self::Inode, Self::Error> {
         // If path is relative then find inode of cwd otherwise return inode of root path
         let inode = if path.chars().nth(0).unwrap() == '.' {
-            self.navigate(self.i_get(1)?, &self.get_cwd())?
+            self.navigate_from_inode(self.i_get(1)?, &self.get_cwd())?
         } else {
             self.i_get(1)?
         };
         // finally find inode on given path from starting inode
-        return Ok(self.navigate(inode, path)?);
+        return Ok(self.navigate_from_inode(inode, path)?);
     }
 
     fn mkdir(&mut self, path: &str) -> Result<Self::Inode, Self::Error> {
@@ -250,9 +252,9 @@ impl PathSupport for PathsFileSystem {
         if name == "." || name == ".." {
             return Err(Self::Error::InvalidPathFormat("Given path is invalid"));
         }
-        // Resolve directory inode where new directory should be created
+        // Resolve inode of directory where new directory with name should be created
         let mut parent_inode = self.resolve_path(&Self::cd_parent(path.to_owned()))?;
-        // In finall initialize new directory with new allocated inode
+        // Finally initialize new directory with new allocated inode
         let inum = self.i_alloc(FType::TDir)?;
         let mut inode = self.i_get(inum)?;
         self.dirlink(&mut parent_inode, &name, inum)?;
@@ -270,7 +272,7 @@ impl PathSupport for PathsFileSystem {
         let sb = self.sup_get()?;
         // get name of directory
         let name = Self::get_last_name(path);
-        // error if the path ends in "." or ".."; these entries cannot be removed
+        // Error if the path ends in "." or ".."; these entries cannot be removed
         if name == "." || name == ".." {
             return Err(Self::Error::InvalidPathFormat("Given path is invalid"));
         }
@@ -278,15 +280,15 @@ impl PathSupport for PathsFileSystem {
         let parent_inode = self.resolve_path(&Self::cd_parent(path.to_owned()))?;
         // lookup for directory in parent directory, error if no directory with name found
         let (mut inode, de_offset) = self.dirlookup(&parent_inode, &name)?;
-        // error if inode is type dir and is not empty
+        // Error if inode is type dir and is not empty
         if inode.get_ft() == FType::TDir && self.entries_num(&inode)? > 0 {
             return Err(Self::Error::InvalidPathOperation(
                 "Directory to be unlinked is not empty",
             ));
         }
-        // get block with DirEntry on offset
+        // get block where DirEntry with offset is placed
         let block = self.b_get(parent_inode.get_block(de_offset / sb.block_size))?;
-        // wrap block to DirEntryBlock and free DirEntry with offset
+        // wrap this block to DirEntryBlock and free DirEntry with offset
         let mut dir_entry_block = DirEntryBlock::new(block);
         dir_entry_block.de_free(de_offset % sb.block_size)?;
         self.b_put(&dir_entry_block.return_block())?;
@@ -322,8 +324,8 @@ pub trait PathHelper: PathSupport {
     /// - if path is "/" then return "/"
     fn cd_parent(path: String) -> String;
 
-    /// Return Inode of last directory on the path
-    fn navigate(&self, start_inode: Inode, path: &str) -> Result<Inode, Self::Error>;
+    /// Return Inode of last name on the path starting in `start_inode`
+    fn navigate_from_inode(&self, start_inode: Inode, path: &str) -> Result<Inode, Self::Error>;
 
     /// Add name to end of path (same as `cd name` command)
     fn cd_child(path: String, name: &str) -> String;
@@ -334,7 +336,6 @@ pub trait PathHelper: PathSupport {
     /// get number of entries in inode
     fn entries_num(&self, inode: &Inode) -> Result<u64, Self::Error>;
 }
-
 
 impl PathHelper for PathsFileSystem {
     fn get_current_path(&self, path: &str) -> Result<String, Self::Error> {
@@ -372,7 +373,7 @@ impl PathHelper for PathsFileSystem {
         };
     }
 
-    fn navigate(&self, start_inode: Inode, path: &str) -> Result<Inode, Self::Error> {
+    fn navigate_from_inode(&self, start_inode: Inode, path: &str) -> Result<Inode, Self::Error> {
         if !Self::valid_path(path) {
             return Err(Self::Error::InvalidPathFormat("Given path is invalid"));
         }
