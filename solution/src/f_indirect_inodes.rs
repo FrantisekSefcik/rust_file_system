@@ -64,7 +64,7 @@ pub struct DInode {
     /// A list of up to `DIRECT_POINTERS` valid block addresses (counting from 0, *not* from the start of the data block region), to specify where the contents of this file are stored.
     pub direct_blocks: [u64; DIRECT_POINTERS as usize],
     /// Index of block where are stored indirect block indices
-    pub indirect_block: u64
+    pub indirect_block: u64,
 }
 
 lazy_static! {
@@ -108,7 +108,7 @@ impl InodeLike for IndirectInode {
             nlink: nlink as u16,
             size,
             direct_blocks: [0; DIRECT_POINTERS as usize],
-            indirect_block: 0
+            indirect_block: 0,
         };
         // initialize blocks
         for i in 0..blocks.len() {
@@ -140,7 +140,7 @@ impl InodeLike for IndirectInode {
             self.disk_node.indirect_block
         } else {
             self.disk_node.direct_blocks[i as usize]
-        }
+        };
     }
 
     fn get_inum(&self) -> u64 {
@@ -305,7 +305,7 @@ impl InodeSupport for IndirectInodeFileSystem {
     fn i_free(&mut self, i: u64) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
         let inode = self.i_get(i)?; // get inode with index i
-        // Error if inode is already free
+                                    // Error if inode is already free
         if inode.get_ft() == FType::TFree {
             return Err(IndirectInodeLevelError::InvalidInodeOperation(
                 "Inode is already free.",
@@ -355,7 +355,7 @@ impl InodeSupport for IndirectInodeFileSystem {
                         nlink: 0,
                         size: 0,
                         direct_blocks: [0; DIRECT_POINTERS as usize],
-                        indirect_block: 0
+                        indirect_block: 0,
                     },
                     offset,
                 )?;
@@ -514,7 +514,12 @@ pub trait IndirectBlockHelper: InodeRWSupport {
     /// If `i` is less then DIRECT_POINTERS then add `bnum` to direct_blocks
     /// If `i` is higher or equal to DIRECT_POINTERS then save `bnum` to indirect block
     /// Allocate indirect block if number of blocks is over DIRECT_POINTERS size
-    fn set_indirect_block(&mut self, inode: &mut Self::Inode, i: u64, bnum: u64) -> Result<(), Self::Error>;
+    fn set_indirect_block(
+        &mut self,
+        inode: &mut Self::Inode,
+        i: u64,
+        bnum: u64,
+    ) -> Result<(), Self::Error>;
 
     /// Get block number with index `i` from `inode`
     /// If `i` is less then DIRECT_POINTERS then get `bnum` from direct_blocks
@@ -523,7 +528,12 @@ pub trait IndirectBlockHelper: InodeRWSupport {
 }
 
 impl IndirectBlockHelper for IndirectInodeFileSystem {
-    fn set_indirect_block(&mut self, inode: &mut Self::Inode, i: u64, bnum: u64) -> Result<(), Self::Error> {
+    fn set_indirect_block(
+        &mut self,
+        inode: &mut Self::Inode,
+        i: u64,
+        bnum: u64,
+    ) -> Result<(), Self::Error> {
         let sb = self.sup_get()?;
         // check if index exceed capacity of direct_blocks
         if i < DIRECT_POINTERS {
@@ -535,8 +545,7 @@ impl IndirectBlockHelper for IndirectInodeFileSystem {
                 inode.disk_node.indirect_block = a;
             }
             // wrap indirect_block block to IndirectBlock helper
-            let mut indirect_block =
-                IndirectBlock::new(self.b_get(inode.get_indirect_block())?);
+            let mut indirect_block = IndirectBlock::new(self.b_get(inode.get_indirect_block())?);
             // save bnum to block
             indirect_block.put_block_num(i - DIRECT_POINTERS, bnum)?;
             // finally save block back
@@ -599,10 +608,12 @@ pub type FSName = IndirectInodeFileSystem;
 #[cfg(test)]
 #[path = "../../api/fs-tests"]
 mod test_with_utils {
-    use cplfs_api::fs::{BlockSupport, FileSysSupport, InodeSupport, InodeRWSupport};
-    use cplfs_api::types::{SuperBlock, InodeLike, DIRECT_POINTERS, FType, Buffer};
+    use cplfs_api::fs::{BlockSupport, FileSysSupport, InodeRWSupport, InodeSupport};
+    use cplfs_api::types::{Buffer, FType, InodeLike, SuperBlock, DIRECT_POINTERS};
 
-    use crate::f_indirect_inodes::{FSName, IndirectBlock, IndirectBlockHelper, IndirectInode, DInode};
+    use crate::f_indirect_inodes::{
+        DInode, FSName, IndirectBlock, IndirectBlockHelper, IndirectInode,
+    };
 
     #[path = "utils.rs"]
     mod utils;
@@ -658,10 +669,15 @@ mod test_with_utils {
         }
         assert_eq!(inode.get_block(DIRECT_POINTERS), 0);
         // save first indirect block
-        assert!(my_fs.set_indirect_block(&mut inode, DIRECT_POINTERS , 45).is_ok());
+        assert!(my_fs
+            .set_indirect_block(&mut inode, DIRECT_POINTERS, 45)
+            .is_ok());
         // should be allocated block to storing indirect blocks
         assert_eq!(inode.get_indirect_block(), SUPERBLOCK_GOOD.datastart);
-        assert_eq!(my_fs.get_indirect_block(&inode, DIRECT_POINTERS).unwrap(), 45);
+        assert_eq!(
+            my_fs.get_indirect_block(&inode, DIRECT_POINTERS).unwrap(),
+            45
+        );
 
         let dev = my_fs.unmountfs();
         utils::disk_destruct(dev);
@@ -690,7 +706,7 @@ mod test_with_utils {
                 nlink: 0,
                 size: (2.5 * (BLOCK_SIZE as f32)) as u64,
                 direct_blocks: [5, 6, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-                indirect_block: 0
+                indirect_block: 0,
             },
         );
         my_fs.i_put(&i2).unwrap(); //Store the inode to disk as well
@@ -704,8 +720,13 @@ mod test_with_utils {
         assert_eq!(my_fs.i_get(2).unwrap(), i2);
         assert_eq!(4600, i2.get_size());
         // in first indirect blocks should be all 7
-        assert_eq!(my_fs.b_get(my_fs.get_indirect_block(&i2, DIRECT_POINTERS).unwrap()).unwrap().contents_as_ref(),
-                   &write_result[..]);
+        assert_eq!(
+            my_fs
+                .b_get(my_fs.get_indirect_block(&i2, DIRECT_POINTERS).unwrap())
+                .unwrap()
+                .contents_as_ref(),
+            &write_result[..]
+        );
         // try to read any data from border between direct and indirect blocks
         let mut buf800 = Buffer::new_zero(800);
         let read_result = vec![7; 800];
@@ -727,15 +748,21 @@ mod test_with_utils {
         assert_eq!(4000, i2.get_size());
         // assert all direct blocks
         for i in 0..DIRECT_POINTERS {
-            assert_eq!(my_fs.get_indirect_block(&i2, i).unwrap(), i + SUPERBLOCK_GOOD.datastart)
+            assert_eq!(
+                my_fs.get_indirect_block(&i2, i).unwrap(),
+                i + SUPERBLOCK_GOOD.datastart
+            )
         }
         // also first indirect block and pointer to indirect blocks
-        assert_eq!(my_fs.get_indirect_block(&i2, DIRECT_POINTERS).unwrap(), 12 + SUPERBLOCK_GOOD.datastart);
+        assert_eq!(
+            my_fs.get_indirect_block(&i2, DIRECT_POINTERS).unwrap(),
+            12 + SUPERBLOCK_GOOD.datastart
+        );
         assert_eq!(i2.get_indirect_block(), 13 + SUPERBLOCK_GOOD.datastart);
         // free inode
         assert!(my_fs.i_free(2).is_ok());
         // all blocks should be free
-        for i in 0..(4000 / BLOCK_SIZE) + 1  {
+        for i in 0..(4000 / BLOCK_SIZE) + 1 {
             assert!(my_fs.b_free(i).is_err());
         }
         assert_eq!(my_fs.i_get(2).unwrap().get_ft(), FType::TFree);
@@ -743,9 +770,6 @@ mod test_with_utils {
         let dev = my_fs.unmountfs();
         utils::disk_destruct(dev);
     }
-
-
-
 }
 // WARNING: DO NOT TOUCH THE BELOW CODE -- IT IS REQUIRED FOR TESTING -- YOU WILL LOSE POINTS IF I MANUALLY HAVE TO FIX YOUR TESTS
 #[cfg(all(test, any(feature = "f", feature = "all")))]

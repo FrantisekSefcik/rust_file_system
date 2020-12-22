@@ -79,7 +79,7 @@ use cplfs_api::fs::{
     BlockSupport, FileSysSupport, InodeCacheSupport, InodeRWSupport, InodeSupport,
 };
 use cplfs_api::types::{
-    Block, Buffer, DInode, DIRECT_POINTERS, FType, Inode, InodeLike, SuperBlock,
+    Block, Buffer, DInode, FType, Inode, InodeLike, SuperBlock, DIRECT_POINTERS,
 };
 
 use crate::b_inode_support::InodeLevelError;
@@ -159,7 +159,7 @@ pub enum InodeCacheError {
     InodeError(#[from] InodeLevelError),
     /// Error caused when performing inode read write operations.
     #[error("Inode error: {0}")]
-    InodeRWError(#[from] InodeRWError)
+    InodeRWError(#[from] InodeRWError),
 }
 
 /// `DirectoryFileSystem` wraps InodeFileSystem and add Directory support
@@ -168,7 +168,7 @@ pub struct InodeCacheFileSystem {
     inode_fs: InodeRWFileSystem,
     /// cache is implemented as Vec because we can define capacity of it and we can emit particular CachedInode
     /// as first I implemented cahce as HashMap what seems to me as more effective solution in searching inodes by its inum, but there was problem with emitting elements.
-    inode_cache: Vec<<Self as InodeSupport>::Inode>
+    inode_cache: Vec<<Self as InodeSupport>::Inode>,
 }
 
 /// `InodeFileSystem` struct implements `FileSysSupport` and the `BlockSupport`. Structure wraps `Device` to offer block-level abstraction to operate with File System.
@@ -318,7 +318,6 @@ impl InodeRWSupport for InodeCacheFileSystem {
 }
 
 impl InodeCacheSupport for InodeCacheFileSystem {
-
     fn i_get_mut(&mut self, i: u64) -> Result<Self::Inode, Self::Error> {
         // return inode if it is cached
         if self.is_cached(i) {
@@ -363,7 +362,6 @@ impl InodeCacheSupport for InodeCacheFileSystem {
 
 /// Trait implementing some helper function for inode cache in format of `Vec`
 pub trait VecCacheHelper: InodeCacheSupport {
-
     /// Add inode to cache
     /// In case, cache is full iterate over already cached inodes and replace first without any reference
     /// If there is still place in cache, push Inode to Vec
@@ -373,11 +371,10 @@ pub trait VecCacheHelper: InodeCacheSupport {
 
     /// Iterate over all cahced inodes and return Vec index to this inode
     /// Error if inode is not cached
-    fn get_inode_cache_index(& self, inum: u64) -> Result<u64, Self::Error>;
+    fn get_inode_cache_index(&self, inum: u64) -> Result<u64, Self::Error>;
 }
 
 impl VecCacheHelper for InodeCacheFileSystem {
-
     fn add_inode_to_cache(&mut self, inode: Self::Inode) -> Result<u64, Self::Error> {
         // If capacity is full remove any element
         if self.inode_cache.len() >= self.inode_cache.capacity() {
@@ -392,7 +389,9 @@ impl VecCacheHelper for InodeCacheFileSystem {
                     return Ok(i as u64);
                 }
             }
-            return Err(Self::Error::InodeCacheError("Not found free place in the cache"))
+            return Err(Self::Error::InodeCacheError(
+                "Not found free place in the cache",
+            ));
         } else {
             // otherwise push inode to the cache
             self.inode_cache.push(inode);
@@ -400,17 +399,18 @@ impl VecCacheHelper for InodeCacheFileSystem {
         }
     }
 
-    fn get_inode_cache_index(& self, inum: u64) -> Result<u64, Self::Error> {
+    fn get_inode_cache_index(&self, inum: u64) -> Result<u64, Self::Error> {
         // iterate over cached inodes until there is inode with same inum
         for (i, cached_inode) in self.inode_cache.iter().enumerate() {
             if cached_inode.get_inum() == inum {
                 return Ok(i as u64);
             }
         }
-        return Err(Self::Error::InodeCacheError("Not found Inode with inum in the cache"))
+        return Err(Self::Error::InodeCacheError(
+            "Not found Inode with inum in the cache",
+        ));
     }
 }
-
 
 /// You are free to choose the name for your file system. As we will use
 /// automated tests when grading your assignment, indicate here the name of
@@ -476,7 +476,6 @@ mod test_with_utils {
 
     #[test]
     fn btree_test() {
-
         let mut map: HashMap<u64, &str> = HashMap::with_capacity(5);
         map.insert(1, "a");
         map.insert(2, "b");
@@ -490,7 +489,6 @@ mod test_with_utils {
 
     #[test]
     fn vec_test() {
-
         let mut map: Vec<&str> = Vec::with_capacity(5);
         map.insert(0, "a");
         map.insert(1, "b");
@@ -546,7 +544,7 @@ mod test_with_utils {
 
         // test if cached inode after removing is saved to disk
         let i1 = my_fs.i_get(1).unwrap();
-        i1.0.borrow_mut().disk_node.nlink +=1;
+        i1.0.borrow_mut().disk_node.nlink += 1;
         assert_eq!(i1.get_nlink(), 1);
         // cache new inode
         drop(i1);
@@ -558,7 +556,7 @@ mod test_with_utils {
         assert_eq!(i1.get_nlink(), 1);
 
         // test if i_put works
-        i1.0.borrow_mut().disk_node.nlink +=1;
+        i1.0.borrow_mut().disk_node.nlink += 1;
         my_fs.i_put(&i1).unwrap();
         assert_eq!(my_fs.inode_fs.i_get(1).unwrap().get_nlink(), 2); // testing by original Inode
         assert_eq!(my_fs.i_get(1).unwrap().get_nlink(), 2);
